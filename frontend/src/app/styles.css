@@ -1,0 +1,88 @@
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Sora:wght@500;700;800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink: #0a2a2f;
+  --shell: #f7f4ee;
+  --paper: #fffcf7;
+  --mint: #31aeb4;
+  --coral: #ef6f5e;
+  --line: rgba(10, 42, 47, 0.14);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100dvh;
+}
+
+#root {
+  display: flex;
+  justify-content: center;
+}
+
+body {
+  margin: 0;
+  font-family: "Noto Sans SC", sans-serif;
+  color: var(--ink);
+  background: #ffffff;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.travel-noise {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(10, 42, 47, 0.08) 0.4px, transparent 0.4px);
+  background-size: 3px 3px;
+  mix-blend-mode: soft-light;
+  opacity: 0.3;
+}
+
+.mobile-shell {
+  width: min(100vw, 430px);
+  background: #ffffff;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-up {
+  animation: fade-up 0.5s ease-out both;
+}
+
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+@media (max-width: 430px) {
+  .mobile-shell {
+    width: 100vw;
+  }
+}

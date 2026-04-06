@@ -1,0 +1,17 @@
+{
+  "travel_http": {
+    "transport": "http",
+    "url": "${TRAVEL_MCP_URL}",
+    "headers": {
+      "Authorization": "Bearer ${TRAVEL_MCP_TOKEN}"
+    }
+  },
+  "calendar_stdio": {
+    "transport": "stdio",
+    "command": "python",
+    "args": ["-m", "my_calendar_mcp_server"],
+    "env": {
+      "CALENDAR_API_KEY": "${CALENDAR_API_KEY}"
+    }
+  }
+}
