@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 
 import type { ChatMessageItem } from "@/features/chat/model/chat.types";
 import { ItineraryCard } from "@/features/itinerary/ui/itinerary-card";
-import { Badge } from "@/shared/ui/badge";
+import { Badge } from "@/shared/ui";
 import { cn } from "@/shared/lib/cn";
 
 interface ChatMessageProps {
@@ -20,7 +20,7 @@ function MarkdownBubble({
   isUser: boolean;
 }) {
   const proseClassName = cn(
-    "markdown-body max-w-none break-words text-sm leading-7 [overflow-wrap:anywhere] [&_*]:break-words [&_*]:[overflow-wrap:anywhere]",
+    "markdown-body max-w-none break-words text-base leading-relaxed [overflow-wrap:anywhere] [&_*]:break-words [&_*]:[overflow-wrap:anywhere]",
     isUser ? "markdown-user" : "markdown-assistant",
   );
 
@@ -28,17 +28,17 @@ function MarkdownBubble({
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
-        p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
-        h1: ({ children }) => <h1 className="mb-3 text-[1.25rem] font-semibold leading-tight last:mb-0">{children}</h1>,
-        h2: ({ children }) => <h2 className="mb-3 text-[1.1rem] font-semibold leading-tight last:mb-0">{children}</h2>,
-        h3: ({ children }) => <h3 className="mb-2 text-base font-semibold leading-tight last:mb-0">{children}</h3>,
-        ul: ({ children }) => <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>,
-        ol: ({ children }) => <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>,
-        li: ({ children }) => <li className="leading-7">{children}</li>,
+        p: ({ children }) => <p className="text-base leading-relaxed">{children}</p>,
+        h1: ({ children }) => <h1 className="text-2xl font-bold leading-tight">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-xl font-semibold leading-tight">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-lg font-semibold leading-tight">{children}</h3>,
+        ul: ({ children }) => <ul className="list-disc pl-5">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal pl-5">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
         blockquote: ({ children }) => (
           <blockquote
             className={cn(
-              "mb-3 rounded-[8px] border-l-4 px-3 py-2 italic last:mb-0",
+              "rounded-[8px] border-l-4 px-3 py-2 italic",
               isUser ? "border-[#90b9df] bg-[#dceefe]" : "border-[#cfd9dc] bg-[#f6f8f8]",
             )}
           >
@@ -57,10 +57,11 @@ function MarkdownBubble({
         ),
         hr: () => <div className={cn("my-3 h-px", isUser ? "bg-[#b7d6f1]" : "bg-[#e5eded]")} />,
         table: ({ children }) => (
-          <div className="mb-3 overflow-x-auto last:mb-0">
+          <div className="overflow-x-auto">
             <table className="min-w-full border-collapse overflow-hidden rounded-[8px] text-left text-[13px]">{children}</table>
           </div>
         ),
+        strong: ({ children }) => <strong className="font-bold text-[#d4704e]">{children}</strong>,
         thead: ({ children }) => (
           <thead className={cn(isUser ? "bg-[#d8ebfb]" : "bg-[#f4f7f7]")}>{children}</thead>
         ),
@@ -95,7 +96,7 @@ function MarkdownBubble({
             </code>
           );
         },
-        pre: ({ children }) => <pre className="mb-3 overflow-x-auto last:mb-0">{children}</pre>,
+        pre: ({ children }) => <pre className="overflow-x-auto">{children}</pre>,
       }}
     >
       {content}
@@ -109,16 +110,24 @@ export function ChatMessage({ message }: ChatMessageProps) {
   return (
     <div className="fade-up flex px-4">
       <div className={cn("flex w-full flex-col", isUser ? "items-end" : "items-start")}>
-        <div
-          className={cn(
-            "rounded-[8px] border px-4 py-3 text-sm leading-6 break-words [overflow-wrap:anywhere]",
-            isUser
-              ? "max-w-[88%] border-[#c7ddf2] bg-[#e8f3ff] text-[#12394a]"
-              : "w-full border-[#e7ecec] bg-white text-ink",
-          )}
-        >
-          <MarkdownBubble content={message.text} isUser={isUser} />
-        </div>
+        {!isUser && !message.text ? (
+          <div className="flex items-center gap-1.5 px-2 py-1">
+            <span className="typing-dot" style={{ animationDelay: "0ms" }} />
+            <span className="typing-dot" style={{ animationDelay: "160ms" }} />
+            <span className="typing-dot" style={{ animationDelay: "320ms" }} />
+          </div>
+        ) : (
+          <div
+            className={cn(
+              "rounded-xl border px-5 py-4 text-base leading-relaxed break-words",
+              isUser
+                ? "max-w-[90%] border-[#e8d5c4] bg-[#f5ede4] text-[#2c2b28] shadow-sm"
+                : "w-full border-[#2c2b28]/[0.06] bg-white text-[#2c2b28] shadow-sm",
+            )}
+          >
+            <MarkdownBubble content={message.text} isUser={isUser} />
+          </div>
+        )}
 
         {!isUser && message.itinerary?.length ? (
           <ItineraryCard itinerary={message.itinerary} followups={message.followups} />

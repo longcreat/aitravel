@@ -1,8 +1,7 @@
 import { MapPin, Sparkles } from "lucide-react";
 
 import type { ItineraryItem } from "@/features/chat/model/chat.types";
-import { Badge } from "@/shared/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
+import { Badge, Card, CardContent, CardHeader, CardTitle } from "@/shared/ui";
 
 interface ItineraryCardProps {
   itinerary: ItineraryItem[];

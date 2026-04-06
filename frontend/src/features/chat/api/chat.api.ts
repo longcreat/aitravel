@@ -1,5 +1,6 @@
 import type { ChatInvokeRequest, ChatStreamEvent, SessionDetail, SessionSummary } from "@/features/chat/model/chat.types";
 import { env } from "@/shared/config/env";
+import { http } from "@/shared/lib/http";
 
 type StreamEventName = ChatStreamEvent["event"];
 
@@ -122,29 +123,17 @@ export async function streamChat(payload: ChatInvokeRequest, options: StreamChat
 }
 
 export async function listSessions(): Promise<SessionSummary[]> {
-  const response = await fetch(`${env.apiBaseUrl}/api/sessions`);
-  return parseJsonResponse<SessionSummary[]>(response);
+  return http.get<SessionSummary[]>("/api/sessions");
 }
 
 export async function getSession(threadId: string): Promise<SessionDetail> {
-  const response = await fetch(`${env.apiBaseUrl}/api/sessions/${encodeURIComponent(threadId)}`);
-  return parseJsonResponse<SessionDetail>(response);
+  return http.get<SessionDetail>(`/api/sessions/${encodeURIComponent(threadId)}`);
 }
 
 export async function renameSession(threadId: string, title: string): Promise<SessionSummary> {
-  const response = await fetch(`${env.apiBaseUrl}/api/sessions/${encodeURIComponent(threadId)}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ title }),
-  });
-  return parseJsonResponse<SessionSummary>(response);
+  return http.patch<SessionSummary>(`/api/sessions/${encodeURIComponent(threadId)}`, { title });
 }
 
 export async function deleteSession(threadId: string): Promise<void> {
-  const response = await fetch(`${env.apiBaseUrl}/api/sessions/${encodeURIComponent(threadId)}`, {
-    method: "DELETE",
-  });
-  await parseJsonResponse<{ deleted: boolean }>(response);
+  return http.delete<void>(`/api/sessions/${encodeURIComponent(threadId)}`);
 }

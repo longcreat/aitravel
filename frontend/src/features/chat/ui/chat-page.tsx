@@ -5,7 +5,8 @@ import type { SessionSummary } from "@/features/chat/model/chat.types";
 import { useChatAgent } from "@/features/chat/hooks/use-chat-agent";
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
-import { Button } from "@/shared/ui/button";
+import { MobileShell } from "@/shared/layouts/mobile-shell";
+import { Button } from "@/shared/ui";
 
 interface SessionGroup {
   label: "今日" | "7日" | "30日" | "更早";
@@ -99,8 +100,7 @@ export function ChatPage() {
   }
 
   return (
-    <main className="mobile-shell relative flex h-dvh w-full max-w-[430px] flex-col overflow-hidden">
-      <div className="travel-noise" />
+    <MobileShell>
 
       {historyOpen ? (
         <div className="absolute inset-0 z-30 flex bg-black/30">
@@ -218,6 +218,6 @@ export function ChatPage() {
       </section>
 
       <ChatComposer loading={loading} onSend={sendMessage} />
-    </main>
+    </MobileShell>
   );
 }

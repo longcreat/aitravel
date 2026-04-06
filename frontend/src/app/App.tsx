@@ -1,5 +1,12 @@
-import { ChatPage } from "@/features/chat/ui/chat-page";
+import { RouterProvider } from "react-router-dom";
+import { router } from "@/app/routes";
+import { Toaster } from "@/shared/ui";
 
 export function App() {
-  return <ChatPage />;
+  return (
+    <>
+      <RouterProvider router={router} />
+      <Toaster />
+    </>
+  );
 }

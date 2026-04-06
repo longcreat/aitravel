@@ -5,13 +5,46 @@
 @tailwind utilities;
 
 :root {
-  --ink: #0a2a2f;
-  --shell: #f7f4ee;
-  --paper: #fffcf7;
-  --mint: #31aeb4;
-  --coral: #ef6f5e;
-  --line: rgba(10, 42, 47, 0.14);
+  /* ── 品牌色（Brand Tokens） ── */
+  --ink: #2c2b28;
+  --shell: #faf9f7;
+  --paper: #faf9f7;
+  --mint: #d4704e;
+  --coral: #d4704e;
+  --line: rgba(0, 0, 0, 0.06);
+
+  /* ── Shadcn 语义色（桥接品牌色） ── */
+  --background: var(--shell);
+  --foreground: var(--ink);
+
+  --card: #ffffff;
+  --card-foreground: var(--ink);
+
+  --popover: #ffffff;
+  --popover-foreground: var(--ink);
+
+  --primary: var(--ink);
+  --primary-foreground: var(--paper);
+
+  --secondary: #f0ede8;
+  --secondary-foreground: var(--ink);
+
+  --muted: #f0ede8;
+  --muted-foreground: #78746e;
+
+  --accent: var(--mint);
+  --accent-foreground: #ffffff;
+
+  --destructive: #c0392b;
+  --destructive-foreground: #ffffff;
+
+  --border: rgba(44, 43, 40, 0.10);
+  --input: rgba(44, 43, 40, 0.10);
+  --ring: var(--mint);
+
+  --radius: 0.5rem;
 }
+
 
 * {
   box-sizing: border-box;
@@ -33,7 +66,7 @@ body {
   margin: 0;
   font-family: "Noto Sans SC", sans-serif;
   color: var(--ink);
-  background: #ffffff;
+  background: #faf9f7;
 }
 
 button,
@@ -54,7 +87,7 @@ textarea {
 
 .mobile-shell {
   width: min(100vw, 430px);
-  background: #ffffff;
+  background: #faf9f7;
 }
 
 @keyframes fade-up {
@@ -85,4 +118,24 @@ textarea {
   .mobile-shell {
     width: 100vw;
   }
+}
+
+@keyframes typing-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
+
+.typing-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #9b9589;
+  animation: typing-bounce 1.2s ease-in-out infinite;
 }

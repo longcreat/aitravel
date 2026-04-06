@@ -1,8 +1,8 @@
-import { ArrowUp, LoaderCircle } from "lucide-react";
+import { ArrowUp, LoaderCircle, Mic, Keyboard } from "lucide-react";
 import { FormEvent, useState } from "react";
 
-import { Button } from "@/shared/ui/button";
-import { Textarea } from "@/shared/ui/textarea";
+import { Button, Textarea } from "@/shared/ui";
+import { cn } from "@/shared/lib/cn";
 
 interface ChatComposerProps {
   loading: boolean;
@@ -11,6 +11,7 @@ interface ChatComposerProps {
 
 export function ChatComposer({ loading, onSend }: ChatComposerProps) {
   const [value, setValue] = useState("");
+  const [mode, setMode] = useState<"text" | "voice">("text");
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -25,25 +26,81 @@ export function ChatComposer({ loading, onSend }: ChatComposerProps) {
 
   return (
     <form
-      className="sticky bottom-0 z-10 bg-paper/95 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-3 backdrop-blur"
+      className="sticky bottom-0 z-10 bg-[#faf9f7] px-4 pb-[calc(1.2rem+env(safe-area-inset-bottom))] pt-4 backdrop-blur-md"
       onSubmit={handleSubmit}
     >
-      <div className="relative">
-        <Textarea
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          placeholder="例如：6月去东京7天，预算1.2万，2人，偏美食和慢节奏"
-          className="min-h-[96px] pr-14"
-        />
-        <Button
-          type="submit"
-          size="icon"
-          disabled={loading || !value.trim()}
-          aria-label="send-message"
-          className="absolute bottom-2 right-2 h-10 w-10"
-        >
-          {loading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-        </Button>
+      <div className="mx-auto max-w-3xl">
+        {mode === "text" ? (
+          <div className="group flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-4 py-3 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all focus-within:shadow-[0_8px_32px_-8px_rgba(0,0,0,0.10)]">
+            <textarea
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder="发消息或按住说话"
+              rows={1}
+              style={{ height: "24px" }}
+              className="flex-1 max-h-32 resize-none border-none bg-transparent py-0 text-base leading-6 text-ink outline-none focus:ring-0 overflow-y-hidden scrollbar-hidden"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && e.shiftKey) {
+                  e.preventDefault();
+                  const text = value.trim();
+                  if (text && !loading) {
+                    setValue("");
+                    void onSend(text);
+                  }
+                }
+              }}
+              onInput={(e) => {
+                const target = e.target as HTMLTextAreaElement;
+                target.style.height = "24px";
+                target.style.height = `${target.scrollHeight}px`;
+                target.style.overflowY = target.scrollHeight > 128 ? "auto" : "hidden";
+              }}
+            />
+            <div className="flex items-center gap-1 shrink-0">
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                onClick={() => setMode("voice")}
+                className="h-9 w-9 text-muted-foreground hover:bg-muted hover:text-ink transition-all rounded-full active:scale-90"
+                aria-label="switch-to-voice"
+              >
+                <Mic className="h-5 w-5" />
+              </Button>
+              {value.trim() && (
+                <Button
+                  type="submit"
+                  size="icon"
+                  disabled={loading}
+                  aria-label="send-message"
+                  className="h-9 w-9 bg-ink text-white hover:bg-ink/90 transition-all active:scale-95 rounded-full"
+                >
+                  {loading ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ArrowUp className="h-5 w-5" />
+                  )}
+                </Button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="fade-up flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-4 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all">
+            <div className="flex flex-1 items-center justify-center gap-2 text-muted-foreground">
+              <span className="text-base select-none">按住 说话</span>
+            </div>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              onClick={() => setMode("text")}
+              className="h-9 w-9 text-muted-foreground hover:bg-muted hover:text-ink transition-all shrink-0 rounded-full active:scale-90"
+              aria-label="switch-to-keyboard"
+            >
+              <Keyboard className="h-5 w-5" />
+            </Button>
+          </div>
+        )}
       </div>
     </form>
   );
