@@ -1,12 +1,24 @@
-import { Compass, History, MoreHorizontal, Pencil, Plus, RefreshCcw, Trash2, X } from "lucide-react";
+import { Compass, History, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { SessionSummary } from "@/features/chat/model/chat.types";
 import { useChatAgent } from "@/features/chat/hooks/use-chat-agent";
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
-import { MobileShell } from "@/shared/layouts/mobile-shell";
-import { Button } from "@/shared/ui";
+import { 
+  Button, 
+  DropdownMenu, 
+  DropdownMenuContent, 
+  DropdownMenuItem, 
+  DropdownMenuTrigger,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  Input
+} from "@/shared/ui";
 
 interface SessionGroup {
   label: "今日" | "7日" | "30日" | "更早";
@@ -60,10 +72,15 @@ export function ChatPage() {
     renameSessionTitle,
     removeSession,
     startNewSession,
+    stopGenerating,
+    retryLastSubmittedMessage,
   } = useChatAgent();
 
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [menuThreadId, setMenuThreadId] = useState<string | null>(null);
+  const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
+  const [renameSessionObj, setRenameSessionObj] = useState<{ id: string; title: string } | null>(null);
+  const [renameInput, setRenameInput] = useState("");
+  
   const listRef = useRef<HTMLDivElement | null>(null);
   const groupedSessions = useMemo(() => groupSessionsByUpdatedAt(sessions), [sessions]);
 
@@ -76,44 +93,49 @@ export function ChatPage() {
   }, [messages, loading]);
 
   async function handleOpenSession(targetThreadId: string) {
-    setMenuThreadId(null);
     await openSession(targetThreadId);
     setHistoryOpen(false);
   }
 
-  async function handleRenameSession(targetThreadId: string, currentTitle: string) {
-    const nextTitle = window.prompt("请输入会话新名称", currentTitle);
-    if (!nextTitle) {
-      return;
-    }
-    await renameSessionTitle(targetThreadId, nextTitle);
-    setMenuThreadId(null);
+  function handleRenameSession(targetThreadId: string, currentTitle: string) {
+    setRenameInput(currentTitle);
+    setRenameSessionObj({ id: targetThreadId, title: currentTitle });
   }
 
-  async function handleDeleteSession(targetThreadId: string) {
-    const confirmed = window.confirm("确认删除该会话吗？");
-    if (!confirmed) {
+  async function submitRename() {
+    if (!renameSessionObj || !renameInput.trim() || renameInput === renameSessionObj.title) {
+      setRenameSessionObj(null);
       return;
     }
-    await removeSession(targetThreadId);
-    setMenuThreadId(null);
+    await renameSessionTitle(renameSessionObj.id, renameInput.trim());
+    setRenameSessionObj(null);
+  }
+
+  function handleDeleteSession(targetThreadId: string) {
+    setDeleteSessionId(targetThreadId);
+  }
+
+  async function confirmDeleteSession() {
+    if (!deleteSessionId) return;
+    await removeSession(deleteSessionId);
+    setDeleteSessionId(null);
   }
 
   return (
-    <MobileShell>
+    <div className="flex h-full w-full flex-col">
 
       {historyOpen ? (
         <div className="absolute inset-0 z-30 flex bg-black/30">
-          <aside className="relative h-full w-[84%] max-w-[360px] bg-white px-4 pb-4 pt-[calc(0.9rem+env(safe-area-inset-top))]">
+          <aside className="relative h-full w-[84%] max-w-[360px] rounded-r-[8px] bg-white px-4 pb-4 pt-[calc(0.9rem+env(safe-area-inset-top))] sm:pt-[3.15rem]">
             <div className="mb-3 flex items-center justify-between">
               <Button
-                size="icon"
                 variant="ghost"
                 aria-label="new-session"
-                className="bg-[#ece3d5] shadow-sm hover:bg-[#e4d9c9]"
+                className="h-9 rounded-full bg-[#eee7d6] px-4 text-sm font-medium text-[#2c2b28] shadow-sm hover:bg-[#e6ddc9] active:scale-95 transition-all flex items-center gap-1.5"
                 onClick={startNewSession}
               >
-                <Plus className="h-4 w-4" />
+                <Plus className="h-4 w-4 stroke-[2]" />
+                新建会话
               </Button>
               <Button size="icon" variant="ghost" aria-label="close-history" onClick={() => setHistoryOpen(false)}>
                 <X className="h-4 w-4" />
@@ -121,13 +143,20 @@ export function ChatPage() {
             </div>
 
             <div className="scrollbar-hidden h-[calc(100%-3rem)] overflow-y-auto pr-1">
-              {groupedSessions.map((group) => (
+              {groupedSessions.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center text-[#a29f98] pb-20">
+                  <MessageSquare className="mb-4 h-12 w-12 opacity-20" />
+                  <p className="text-sm font-medium">暂无历史会话</p>
+                  <p className="mt-1.5 text-[13px] opacity-60">随时开启你的新旅行对话</p>
+                </div>
+              ) : (
+                groupedSessions.map((group) => (
                 <section key={group.label} className="mb-4">
                   <p className="mb-2 text-xs font-semibold text-[#47686d]">{group.label}</p>
                   <div className="space-y-2">
                     {group.items.map((session) => (
-                      <div key={session.thread_id} className="relative rounded-[8px] bg-white px-2.5 py-0.5 shadow-sm">
-                        <div className="flex min-h-[30px] items-center gap-2">
+                      <div key={session.thread_id} className="group relative rounded-lg px-2 hover:bg-black/5 transition-colors -mx-2">
+                        <div className="flex min-h-[36px] items-center gap-2">
                           <button
                             type="button"
                             className="flex min-w-0 flex-1 items-center py-0.5 text-left"
@@ -139,43 +168,40 @@ export function ChatPage() {
                             </p>
                           </button>
 
-                          <button
-                            type="button"
-                            className="shrink-0 p-0.5 text-[#5f7a7e]"
-                            aria-label={`session-menu-${session.thread_id}`}
-                            onClick={() =>
-                              setMenuThreadId((current) => (current === session.thread_id ? null : session.thread_id))
-                            }
-                          >
-                            <MoreHorizontal className="h-4 w-4" />
-                          </button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className="shrink-0 rounded-md p-0.5 text-[#5f7a7e] outline-none hover:bg-black/5 data-[state=open]:bg-black/5"
+                                aria-label={`session-menu-${session.thread_id}`}
+                              >
+                                <MoreHorizontal className="h-4 w-4" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-[128px] rounded-xl p-1 shadow-lg">
+                              <DropdownMenuItem
+                                className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs text-ink focus:bg-[#f4f7f7]"
+                                onClick={() => void handleRenameSession(session.thread_id, session.title)}
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                                重命名
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs text-[#8d3b2f] focus:bg-[#fff0ee] focus:text-[#8d3b2f]"
+                                onClick={() => void handleDeleteSession(session.thread_id)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                删除
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
-
-                        {menuThreadId === session.thread_id ? (
-                          <div className="absolute right-2 top-9 z-10 w-[128px] rounded-xl bg-white p-1 shadow-lg">
-                            <button
-                              type="button"
-                              className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-xs text-ink hover:bg-[#f4f7f7]"
-                              onClick={() => void handleRenameSession(session.thread_id, session.title)}
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                              重命名
-                            </button>
-                            <button
-                              type="button"
-                              className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-xs text-[#8d3b2f] hover:bg-[#fff0ee]"
-                              onClick={() => void handleDeleteSession(session.thread_id)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              删除
-                            </button>
-                          </div>
-                        ) : null}
                       </div>
                     ))}
                   </div>
                 </section>
-              ))}
+              ))
+              )}
             </div>
           </aside>
 
@@ -208,7 +234,7 @@ export function ChatPage() {
           <div className="px-4">
             <div className="flex items-center justify-between rounded-2xl bg-[#fff0ee] px-3 py-2 text-xs text-[#8d3b2f] shadow-sm">
               <span className="mr-2 truncate">请求失败：{error}</span>
-              <Button variant="ghost" size="sm" onClick={() => void sendMessage("请继续刚才的建议")}>
+              <Button variant="ghost" size="sm" onClick={() => void retryLastSubmittedMessage()}>
                 <RefreshCcw className="mr-1 h-3.5 w-3.5" />
                 重试
               </Button>
@@ -217,7 +243,47 @@ export function ChatPage() {
         ) : null}
       </section>
 
-      <ChatComposer loading={loading} onSend={sendMessage} />
-    </MobileShell>
+      <ChatComposer loading={loading} onSend={sendMessage} onStop={stopGenerating} />
+
+      <Dialog open={!!deleteSessionId} onOpenChange={(open) => !open && setDeleteSessionId(null)}>
+        <DialogContent className="max-w-[320px]">
+          <DialogHeader>
+            <DialogTitle>删除会话</DialogTitle>
+            <DialogDescription>
+              确定要删除此对话吗？此操作不可逆。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-row sm:justify-end gap-2 pt-2">
+            <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => setDeleteSessionId(null)}>取消</Button>
+            <Button variant="destructive" className="flex-1 sm:flex-none" onClick={() => void confirmDeleteSession()}>确定删除</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!renameSessionObj} onOpenChange={(open) => !open && setRenameSessionObj(null)}>
+        <DialogContent className="max-w-[320px]">
+          <DialogHeader>
+            <DialogTitle>重命名会话</DialogTitle>
+            <DialogDescription className="hidden">输入一个新的名字</DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <Input 
+              value={renameInput} 
+              onChange={(e) => setRenameInput(e.target.value)} 
+              placeholder="新的会话名称" 
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitRename();
+              }}
+            />
+          </div>
+          <DialogFooter className="flex-row sm:justify-end gap-2">
+            <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => setRenameSessionObj(null)}>取消</Button>
+            <Button className="flex-1 sm:flex-none" onClick={() => void submitRename()}>保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+    </div>
   );
 }

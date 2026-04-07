@@ -1,105 +1,145 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from app.agent.service import TravelAgentService
-from app.schemas.chat import ChatInvokeRequest, StructuredTravelPlan
+from app.agent.service import TravelAgentService, _messages_have_closed_tool_calls
+from app.schemas.chat import ChatInvokeRequest
 
 
-class _FakeGraph:
-    async def astream(self, _payload, config=None, stream_mode=None):
+class _FakeAgent:
+    async def astream(self, _payload, config=None, stream_mode=None, version=None):
         assert config is not None
         assert stream_mode == ["messages", "updates", "values"]
+        assert version == "v2"
+        assert _payload == {"messages": [HumanMessage(content="帮我规划日本行程")]}
 
-        yield "messages", (AIMessageChunk(content="推荐先去东京，", id="chunk-1"), {"langgraph_node": "model"})
-        yield "messages", (AIMessageChunk(content="再去大阪。", id="chunk-2"), {"langgraph_node": "model"})
+        yield {
+            "type": "messages",
+            "ns": (),
+            "data": (AIMessageChunk(content="推荐先去东京，", id="chunk-1"), {"langgraph_node": "model"}),
+        }
+        yield {
+            "type": "messages",
+            "ns": (),
+            "data": (AIMessageChunk(content="再去大阪。", id="chunk-2"), {"langgraph_node": "model"}),
+        }
 
         # 人工重复一遍 tool_called / tool_returned 事件，验证服务层去重能力。
-        yield "updates", {
-            "model": {
+        yield {
+            "type": "updates",
+            "ns": (),
+            "data": {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="我先调用预算工具。",
+                            tool_calls=[{"id": "call-1", "name": "get_current_time", "args": {}}],
+                        )
+                    ]
+                }
+            },
+        }
+        yield {
+            "type": "updates",
+            "ns": (),
+            "data": {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="我先调用预算工具。",
+                            tool_calls=[{"id": "call-1", "name": "get_current_time", "args": {}}],
+                        )
+                    ]
+                }
+            },
+        }
+        yield {
+            "type": "updates",
+            "ns": (),
+            "data": {
+                "tools": {
+                    "messages": [ToolMessage(name="get_current_time", content="当前时间为21:02:21", tool_call_id="call-1")]
+                }
+            },
+        }
+        yield {
+            "type": "updates",
+            "ns": (),
+            "data": {
+                "tools": {
+                    "messages": [ToolMessage(name="get_current_time", content="当前时间为21:02:21", tool_call_id="call-1")]
+                }
+            },
+        }
+
+        yield {
+            "type": "values",
+            "ns": (),
+            "data": {
                 "messages": [
                     AIMessage(
-                        content="我先调用预算工具。",
-                        tool_calls=[{"id": "call-1", "name": "estimate_trip_budget", "args": {"days": 3, "travelers": 2}}],
-                    )
-                ]
-            }
-        }
-        yield "updates", {
-            "model": {
-                "messages": [
-                    AIMessage(
-                        content="我先调用预算工具。",
-                        tool_calls=[{"id": "call-1", "name": "estimate_trip_budget", "args": {"days": 3, "travelers": 2}}],
-                    )
-                ]
-            }
-        }
-        yield "updates", {
-            "tools": {
-                "messages": [ToolMessage(name="estimate_trip_budget", content="预算约5400元", tool_call_id="call-1")]
-            }
-        }
-        yield "updates", {
-            "tools": {
-                "messages": [ToolMessage(name="estimate_trip_budget", content="预算约5400元", tool_call_id="call-1")]
-            }
-        }
-
-        yield "values", {
-            "messages": [
-                AIMessage(
-                    content="推荐先去东京，再去大阪。",
-                    tool_calls=[{"id": "call-1", "name": "estimate_trip_budget", "args": {"days": 3, "travelers": 2}}],
-                ),
-                ToolMessage(name="estimate_trip_budget", content="预算约5400元", tool_call_id="call-1"),
-                AIMessage(content="推荐先去东京，再去大阪。"),
-            ],
-            "structured_response": StructuredTravelPlan(
-                summary="6天日本双城轻松线",
-                itinerary=[{"day": 1, "city": "Tokyo", "activities": ["浅草寺", "上野公园"]}],
-                followups=["你更偏好购物还是美食？"],
-            ),
+                        content="推荐先去东京，再去大阪。",
+                        tool_calls=[{"id": "call-1", "name": "get_current_time", "args": {}}],
+                    ),
+                    ToolMessage(name="get_current_time", content="当前时间为21:02:21", tool_call_id="call-1"),
+                    AIMessage(content="推荐先去东京，再去大阪。"),
+                ],
+            },
         }
 
 
-class _NoTokenGraph:
-    async def astream(self, _payload, config=None, stream_mode=None):
+class _NoTokenAgent:
+    async def astream(self, _payload, config=None, stream_mode=None, version=None):
         assert config is not None
         assert stream_mode == ["messages", "updates", "values"]
-        yield "values", {
-            "messages": [AIMessage(content="只返回最终答案")],
-            "structured_response": StructuredTravelPlan(
-                summary="只返回最终答案",
-                itinerary=[],
-                followups=[],
-            ),
+        assert version == "v2"
+        yield {
+            "type": "values",
+            "ns": (),
+            "data": {
+                "messages": [AIMessage(content="只返回最终答案")],
+            },
         }
 
 
-class _CaptureInputGraph:
+class _CaptureInputAgent:
     def __init__(self) -> None:
         self.calls: list[list] = []
 
-    async def astream(self, payload, config=None, stream_mode=None):
+    async def astream(self, payload, config=None, stream_mode=None, version=None):
         assert config is not None
         assert stream_mode == ["messages", "updates", "values"]
+        assert version == "v2"
         self.calls.append(list(payload["messages"]))
-        yield "values", {
-            "messages": [AIMessage(content="收到")],
-            "structured_response": StructuredTravelPlan(summary="收到", itinerary=[], followups=[]),
+        yield {
+            "type": "values",
+            "ns": (),
+            "data": {
+                "messages": [AIMessage(content="收到")],
+            },
         }
 
 
 class _DummyCheckpointer:
     def __init__(self) -> None:
         self.deleted_threads: list[str] = []
+        self.lock = asyncio.Lock()
+        self.conn = None
 
     async def adelete_thread(self, thread_id: str) -> None:
         self.deleted_threads.append(thread_id)
+
+    async def alist(self, _config, limit=None):
+        if False:
+            yield None
+        return
+
+    async def setup(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -118,7 +158,7 @@ async def test_travel_agent_service_stream_invoke(monkeypatch: pytest.MonkeyPatc
         return dummy_checkpointer, None
 
     monkeypatch.setattr("app.agent.service.build_memory_runtime", _fake_build_memory_runtime)
-    monkeypatch.setattr("app.agent.service.create_agent", lambda **_kwargs: _FakeGraph())
+    monkeypatch.setattr("app.agent.service.create_agent", lambda **_kwargs: _FakeAgent())
 
     cfg = tmp_path / "mcp.servers.json"
     cfg.write_text("{}", encoding="utf-8")
@@ -134,16 +174,12 @@ async def test_travel_agent_service_stream_invoke(monkeypatch: pytest.MonkeyPatc
         events.append((event_name, payload))
 
     names = [name for name, _ in events]
-    assert names == ["start", "token", "token", "tool_called", "tool_returned", "final"]
-    assert events[1][1]["chunk"]["content"] == "推荐先去东京，"
-    assert events[1][1]["meta"]["node"] == "model"
-    assert events[1][1]["meta"]["sequence"] == 1
-    assert "delta" not in events[1][1]
-    assert events[2][1]["chunk"]["content"] == "再去大阪。"
-    assert events[3][1]["tool_name"] == "estimate_trip_budget"
-    assert events[4][1]["tool_name"] == "estimate_trip_budget"
-    assert events[5][1]["assistant_message"] == "推荐先去东京，再去大阪。"
-    assert events[5][1]["itinerary"][0]["city"] == "Tokyo"
+    assert names == ["messages", "messages", "updates", "updates", "updates", "updates", "values"]
+    assert events[0][1]["type"] == "messages"
+    assert events[0][1]["data"][0]["type"] == "AIMessageChunk"
+    assert events[0][1]["data"][0]["data"]["content"] == "推荐先去东京，"
+    assert events[-1][1]["type"] == "values"
+    assert events[-1][1]["data"]["messages"][-1]["data"]["content"] == "推荐先去东京，再去大阪。"
 
     detail = service.get_session_detail("thread-1")
     assert detail is not None
@@ -171,7 +207,7 @@ async def test_travel_agent_service_stream_invoke_without_token_events(
         return dummy_checkpointer, None
 
     monkeypatch.setattr("app.agent.service.build_memory_runtime", _fake_build_memory_runtime)
-    monkeypatch.setattr("app.agent.service.create_agent", lambda **_kwargs: _NoTokenGraph())
+    monkeypatch.setattr("app.agent.service.create_agent", lambda **_kwargs: _NoTokenAgent())
 
     cfg = tmp_path / "mcp.servers.json"
     cfg.write_text("{}", encoding="utf-8")
@@ -187,12 +223,12 @@ async def test_travel_agent_service_stream_invoke_without_token_events(
         events.append((event_name, payload))
 
     names = [name for name, _ in events]
-    assert names == ["start", "final"]
-    assert events[1][1]["assistant_message"] == "只返回最终答案"
+    assert names == ["values"]
+    assert events[0][1]["data"]["messages"][0]["data"]["content"] == "只返回最终答案"
 
 
 @pytest.mark.asyncio
-async def test_travel_agent_service_uses_latest_human_message_as_graph_input(
+async def test_travel_agent_service_uses_latest_human_message_as_agent_input(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     async def _fake_load_mcp_tools(_connections):
@@ -200,7 +236,7 @@ async def test_travel_agent_service_uses_latest_human_message_as_graph_input(
 
         return MCPToolBundle(tools=[], connected_servers=["demo"], errors=[])
 
-    capture_graph = _CaptureInputGraph()
+    capture_agent = _CaptureInputAgent()
 
     monkeypatch.setattr("app.agent.service.load_mcp_connections", lambda _path: {})
     monkeypatch.setattr("app.agent.service.load_mcp_tools", _fake_load_mcp_tools)
@@ -211,7 +247,7 @@ async def test_travel_agent_service_uses_latest_human_message_as_graph_input(
         return dummy_checkpointer, None
 
     monkeypatch.setattr("app.agent.service.build_memory_runtime", _fake_build_memory_runtime)
-    monkeypatch.setattr("app.agent.service.create_agent", lambda **_kwargs: capture_graph)
+    monkeypatch.setattr("app.agent.service.create_agent", lambda **_kwargs: capture_agent)
 
     cfg = tmp_path / "mcp.servers.json"
     cfg.write_text("{}", encoding="utf-8")
@@ -230,10 +266,29 @@ async def test_travel_agent_service_uses_latest_human_message_as_graph_input(
     ):
         pass
 
-    assert len(capture_graph.calls) == 2
-    assert len(capture_graph.calls[0]) == 1
-    assert isinstance(capture_graph.calls[0][0], HumanMessage)
-    assert capture_graph.calls[0][0].content == "第一句"
-    assert len(capture_graph.calls[1]) == 1
-    assert isinstance(capture_graph.calls[1][0], HumanMessage)
-    assert capture_graph.calls[1][0].content == "第二句"
+    assert len(capture_agent.calls) == 2
+    assert len(capture_agent.calls[0]) == 1
+    assert isinstance(capture_agent.calls[0][0], HumanMessage)
+    assert capture_agent.calls[0][0].content == "第一句"
+    assert len(capture_agent.calls[1]) == 1
+    assert isinstance(capture_agent.calls[1][0], HumanMessage)
+    assert capture_agent.calls[1][0].content == "第二句"
+
+
+def test_messages_have_closed_tool_calls() -> None:
+    assert _messages_have_closed_tool_calls(
+        [
+            HumanMessage(content="查天气"),
+            AIMessage(content="", tool_calls=[{"id": "call-1", "name": "get_current_time", "args": {}}]),
+            ToolMessage(name="get_current_time", content="{}", tool_call_id="call-1"),
+            AIMessage(content="现在是晚上九点"),
+        ]
+    )
+
+    assert not _messages_have_closed_tool_calls(
+        [
+            HumanMessage(content="查天气"),
+            AIMessage(content="", tool_calls=[{"id": "call-1", "name": "get_current_time", "args": {}}]),
+            HumanMessage(content="继续"),
+        ]
+    )

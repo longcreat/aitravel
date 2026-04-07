@@ -1,17 +1,25 @@
-import { ArrowUp, LoaderCircle, Mic, Keyboard } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { ArrowUp, Keyboard, Mic, Square } from "lucide-react";
+import { FormEvent, useState, useRef, useEffect } from "react";
 
-import { Button, Textarea } from "@/shared/ui";
-import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui";
 
 interface ChatComposerProps {
   loading: boolean;
   onSend: (message: string) => Promise<void>;
+  onStop: () => void;
 }
 
-export function ChatComposer({ loading, onSend }: ChatComposerProps) {
+export function ChatComposer({ loading, onSend, onStop }: ChatComposerProps) {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<"text" | "voice">("text");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (value === "" && textareaRef.current) {
+      textareaRef.current.style.height = "24px";
+      textareaRef.current.style.overflowY = "hidden";
+    }
+  }, [value]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -26,13 +34,14 @@ export function ChatComposer({ loading, onSend }: ChatComposerProps) {
 
   return (
     <form
-      className="sticky bottom-0 z-10 bg-[#faf9f7] px-4 pb-[calc(1.2rem+env(safe-area-inset-bottom))] pt-4 backdrop-blur-md"
+      className="relative bottom-0 z-10 px-4 pb-4 pt-10 bg-gradient-to-t from-paper via-paper to-transparent"
       onSubmit={handleSubmit}
     >
       <div className="mx-auto max-w-3xl">
         {mode === "text" ? (
           <div className="group flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-4 py-3 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all focus-within:shadow-[0_8px_32px_-8px_rgba(0,0,0,0.10)]">
             <textarea
+              ref={textareaRef}
               value={value}
               onChange={(event) => setValue(event.target.value)}
               placeholder="发消息或按住说话"
@@ -67,20 +76,27 @@ export function ChatComposer({ loading, onSend }: ChatComposerProps) {
               >
                 <Mic className="h-5 w-5" />
               </Button>
-              {value.trim() && (
+              {loading ? (
                 <Button
-                  type="submit"
+                  type="button"
                   size="icon"
-                  disabled={loading}
-                  aria-label="send-message"
+                  aria-label="stop-generating"
                   className="h-9 w-9 bg-ink text-white hover:bg-ink/90 transition-all active:scale-95 rounded-full"
+                  onClick={onStop}
                 >
-                  {loading ? (
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <ArrowUp className="h-5 w-5" />
-                  )}
+                  <Square className="h-4 w-4 fill-current" />
                 </Button>
+              ) : (
+                value.trim() && (
+                  <Button
+                    type="submit"
+                    size="icon"
+                    aria-label="send-message"
+                    className="h-9 w-9 bg-ink text-white hover:bg-ink/90 transition-all active:scale-95 rounded-full"
+                  >
+                    <ArrowUp className="h-5 w-5" />
+                  </Button>
+                )
               )}
             </div>
           </div>

@@ -5,55 +5,39 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from datetime import datetime, timedelta, timezone as dt_timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain.tools import tool
 
-
 @tool
-def estimate_trip_budget(
-    days: int, travelers: int, budget_level: Literal["economy", "standard", "premium"] = "standard"
-) -> dict:
-    """根据天数、人数与预算等级估算总预算（人民币）。"""
-    level_multiplier = {"economy": 0.75, "standard": 1.0, "premium": 1.8}
-    base_cost_per_day = 900
-    total = int(days * travelers * base_cost_per_day * level_multiplier[budget_level])
+def get_current_time(timezone_name: str = "Asia/Shanghai") -> dict:
+    """返回指定时区的当前时间，默认使用上海时区。"""
+    try:
+        tzinfo = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        fallback_timezones = {
+            "Asia/Shanghai": dt_timezone(timedelta(hours=8), name="Asia/Shanghai"),
+            "UTC": dt_timezone.utc,
+        }
+        tzinfo = fallback_timezones.get(timezone_name)
+    if tzinfo is None:
+        return {
+            "error": f"Unknown timezone: {timezone_name}",
+            "timezone": timezone_name,
+        }
+
+    now = datetime.now(tzinfo)
     return {
-        "currency": "CNY",
-        "total_estimate": total,
-        "daily_per_person": int(total / max(days * travelers, 1)),
-        "assumption": f"{budget_level} level with typical city travel costs",
-    }
-
-
-@tool
-def convert_currency(amount: float, from_currency: str, to_currency: str, fx_rate: float) -> dict:
-    """按传入汇率执行币种换算。"""
-    converted = round(amount * fx_rate, 2)
-    return {
-        "from": {"currency": from_currency.upper(), "amount": amount},
-        "to": {"currency": to_currency.upper(), "amount": converted},
-        "fx_rate": fx_rate,
-    }
-
-
-@tool
-def suggest_city_by_theme(theme: str, season: str = "all") -> dict:
-    """根据旅行主题与季节偏好推荐候选城市。"""
-    mapping = {
-        "culture": ["Kyoto", "Istanbul", "Xi'an"],
-        "food": ["Osaka", "Bangkok", "Chengdu"],
-        "nature": ["Reykjavik", "Queenstown", "Yunnan"],
-        "beach": ["Phuket", "Bali", "Sanya"],
-    }
-    normalized = theme.strip().lower()
-    return {
-        "theme": normalized,
-        "season": season,
-        "cities": mapping.get(normalized, ["Tokyo", "Singapore", "Shanghai"]),
+        "timezone": timezone_name,
+        "iso_datetime": now.isoformat(),
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"),
+        "weekday": now.strftime("%A"),
+        "utc_offset": now.strftime("%z"),
     }
 
 
 def get_local_tools() -> list:
     """返回本地工具列表。"""
-    return [estimate_trip_budget, convert_currency, suggest_city_by_theme]
+    return [get_current_time]

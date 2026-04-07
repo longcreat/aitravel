@@ -1,10 +1,3 @@
-export interface ItineraryItem {
-  day: number;
-  city: string;
-  activities: string[];
-  notes?: string | null;
-}
-
 export interface ToolTrace {
   phase: "called" | "returned";
   tool_name: string;
@@ -26,68 +19,51 @@ export interface ChatInvokeRequest {
 
 export interface ChatFinalPayload {
   assistant_message: string;
-  itinerary: ItineraryItem[];
-  followups: string[];
   debug: ChatDebugInfo;
 }
 
-export interface ChatChunkPayload {
-  id: string | null;
-  type: string | null;
-  content: unknown;
-  name: string | null;
-  chunk_position: unknown;
-  tool_call_chunks: unknown[];
-  tool_calls: unknown[];
-  invalid_tool_calls: unknown[];
-  usage_metadata: unknown;
-  response_metadata: Record<string, unknown>;
-  additional_kwargs: Record<string, unknown>;
+export interface SerializedLangChainMessage {
+  type: string;
+  data: {
+    content?: unknown;
+    additional_kwargs?: Record<string, unknown>;
+    response_metadata?: Record<string, unknown>;
+    type?: string | null;
+    name?: string | null;
+    id?: string | null;
+    tool_calls?: Array<{
+      name?: string;
+      args?: unknown;
+      id?: string;
+      type?: string;
+    }>;
+    invalid_tool_calls?: unknown[];
+    usage_metadata?: unknown;
+    tool_call_chunks?: unknown[];
+    chunk_position?: unknown;
+    tool_call_id?: string;
+    artifact?: unknown;
+    status?: string;
+  };
 }
 
-export interface ChatChunkMeta {
-  node: string | null;
-  sequence: number;
-  emitted_at: string;
-}
-
-export interface ChatChunkFrame {
-  chunk: ChatChunkPayload;
-  meta: ChatChunkMeta;
+export interface LangGraphStreamPart {
+  type: "messages" | "updates" | "values" | string;
+  ns: string[];
+  data: unknown;
+  interrupts?: unknown;
 }
 
 export type ChatStreamEvent =
   | {
-      event: "start";
-      data: {
-        thread_id: string;
-        started_at: string;
-      };
-    }
-  | {
-      event: "token";
-      data: ChatChunkFrame;
-    }
-  | {
-      event: "tool_called" | "tool_returned";
-      data: {
-        tool_name: string;
-        payload: unknown;
-      };
-    }
-  | {
-      event: "final";
-      data: ChatFinalPayload;
+      event: "messages" | "updates" | "values";
+      data: LangGraphStreamPart;
     }
   | {
       event: "error";
       data: {
         message: string;
       };
-    }
-  | {
-      event: "done";
-      data: Record<string, never>;
     };
 
 export type ChatRole = "user" | "assistant";
@@ -96,9 +72,7 @@ export interface ChatMessageItem {
   id: string;
   role: ChatRole;
   text: string;
-  chunk_frames?: ChatChunkFrame[];
-  itinerary?: ItineraryItem[];
-  followups?: string[];
+  status?: "streaming" | "stopped";
   debug?: ChatDebugInfo;
 }
 
@@ -106,8 +80,6 @@ export interface PersistedChatMessage {
   id: number;
   role: ChatRole;
   text: string;
-  itinerary: ItineraryItem[];
-  followups: string[];
   debug: ChatDebugInfo | null;
   created_at: string;
 }

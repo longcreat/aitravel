@@ -36,15 +36,13 @@ describe("ChatPage", () => {
     });
   });
 
-  it("streams token, tool events and final structured response", async () => {
+  it("streams token, tool events and final text response", async () => {
     const stream = createSseStream([
-      'event: start\ndata: {"thread_id":"thread-test-1","started_at":"2026-04-05T00:00:00Z"}\n\n',
-      'event: token\ndata: {"chunk":{"id":"chunk-1","type":"AIMessageChunk","content":"推荐你先去东京，","name":null,"chunk_position":null,"tool_call_chunks":[],"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null,"response_metadata":{},"additional_kwargs":{}},"meta":{"node":"model","sequence":1,"emitted_at":"2026-04-05T00:00:01Z"}}\n\n',
-      'event: token\ndata: {"chunk":{"id":"chunk-2","type":"AIMessageChunk","content":"再去大阪。","name":null,"chunk_position":null,"tool_call_chunks":[],"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":{"input_tokens":10,"output_tokens":6},"response_metadata":{},"additional_kwargs":{}},"meta":{"node":"model","sequence":2,"emitted_at":"2026-04-05T00:00:02Z"}}\n\n',
-      'event: tool_called\ndata: {"tool_name":"estimate_trip_budget","payload":{"days":6}}\n\n',
-      'event: tool_returned\ndata: {"tool_name":"estimate_trip_budget","payload":"预算约5400元"}\n\n',
-      'event: final\ndata: {"assistant_message":"推荐你先去东京，再去大阪。","itinerary":[{"day":1,"city":"Tokyo","activities":["浅草寺","上野公园"]}],"followups":["你更偏好购物还是美食？"],"debug":{"tool_traces":[{"phase":"called","tool_name":"estimate_trip_budget","payload":{"days":6}},{"phase":"returned","tool_name":"estimate_trip_budget","payload":"预算约5400元"}],"mcp_connected_servers":[],"mcp_errors":[]}}\n\n',
-      "event: done\ndata: {}\n\n",
+      'event: messages\ndata: {"type":"messages","ns":[],"data":[{"type":"AIMessageChunk","data":{"content":"推荐你先去东京，","additional_kwargs":{},"response_metadata":{},"type":"AIMessageChunk","name":null,"id":"chunk-1","tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null,"tool_call_chunks":[],"chunk_position":null}},{"langgraph_node":"model"}]}\n\n',
+      'event: messages\ndata: {"type":"messages","ns":[],"data":[{"type":"AIMessageChunk","data":{"content":"再去大阪。","additional_kwargs":{},"response_metadata":{},"type":"AIMessageChunk","name":null,"id":"chunk-2","tool_calls":[],"invalid_tool_calls":[],"usage_metadata":{"input_tokens":10,"output_tokens":6},"tool_call_chunks":[],"chunk_position":null}},{"langgraph_node":"model"}]}\n\n',
+      'event: updates\ndata: {"type":"updates","ns":[],"data":{"model":{"messages":[{"type":"ai","data":{"content":"我先调用时间工具。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"get_current_time","args":{},"id":"call-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}}]}}}\n\n',
+      'event: updates\ndata: {"type":"updates","ns":[],"data":{"tools":{"messages":[{"type":"tool","data":{"content":"当前时间为21:02:21","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"get_current_time","id":null,"tool_call_id":"call-1","artifact":null,"status":"success"}}]}}}\n\n',
+      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"推荐你先去东京，再去大阪。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -80,7 +78,7 @@ describe("ChatPage", () => {
 
     render(<ChatPage />);
 
-    const input = screen.getByPlaceholderText("例如：6月去东京7天，预算1.2万，2人，偏美食和慢节奏");
+    const input = screen.getByPlaceholderText("发消息或按住说话");
     await userEvent.type(input, "帮我规划日本6天行程");
     await userEvent.click(screen.getByRole("button", { name: "send-message" }));
 
@@ -88,7 +86,6 @@ describe("ChatPage", () => {
       expect(screen.getByText("推荐你先去东京，再去大阪。")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("结构化行程")).toBeInTheDocument();
     expect(screen.queryByText("Chunk Frames")).not.toBeInTheDocument();
     const streamCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/stream"));
     expect(streamCalls).toHaveLength(1);
@@ -128,13 +125,8 @@ describe("ChatPage", () => {
       },
     ];
 
-    const promptMock = vi.spyOn(window, "prompt").mockReturnValue("重命名后的会话");
-    const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(true);
-
     const stream = createSseStream([
-      'event: start\ndata: {"thread_id":"thread-test-2","started_at":"2026-04-05T00:00:00Z"}\n\n',
-      'event: final\ndata: {"assistant_message":"已切换到新会话","itinerary":[],"followups":[],"debug":{"tool_traces":[],"mcp_connected_servers":[],"mcp_errors":[]}}\n\n',
-      "event: done\ndata: {}\n\n",
+      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"已切换到新会话","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -198,20 +190,24 @@ describe("ChatPage", () => {
     expect(screen.getByText("更早")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "session-menu-thread-test-1" }));
-    await userEvent.click(screen.getByRole("button", { name: "重命名" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+    const renameInput = await screen.findByPlaceholderText("新的会话名称");
+    await userEvent.clear(renameInput);
+    await userEvent.type(renameInput, "重命名后的会话");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => {
-      expect(promptMock).toHaveBeenCalledTimes(1);
       expect(sessions[0]?.title).toBe("重命名后的会话");
     });
 
     await userEvent.click(screen.getByRole("button", { name: "session-menu-thread-test-1" }));
-    await userEvent.click(screen.getByRole("button", { name: "删除" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    await userEvent.click(screen.getByRole("button", { name: "确定删除" }));
     await waitFor(() => {
-      expect(confirmMock).toHaveBeenCalledTimes(1);
+      expect(sessions.find((session) => session.thread_id === "thread-test-1")).toBeUndefined();
     });
 
     await userEvent.click(screen.getByRole("button", { name: "close-history" }));
-    await userEvent.type(screen.getByPlaceholderText("例如：6月去东京7天，预算1.2万，2人，偏美食和慢节奏"), "继续规划");
+    await userEvent.type(screen.getByPlaceholderText("发消息或按住说话"), "继续规划");
     await userEvent.click(screen.getByRole("button", { name: "send-message" }));
 
     await waitFor(() => {
@@ -222,5 +218,5 @@ describe("ChatPage", () => {
     expect(streamCalls).toHaveLength(1);
     const streamPayload = JSON.parse(String(streamCalls[0][1]?.body ?? "{}")) as { thread_id?: string };
     expect(streamPayload.thread_id).toBe("thread-test-2");
-  });
+  }, 15000);
 });

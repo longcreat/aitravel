@@ -14,13 +14,11 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from app.schemas.chat import (
     ChatDebugInfo,
-    ItineraryItem,
     PersistedChatMessage,
     SessionDetail,
     SessionSummary,
@@ -81,7 +79,8 @@ class ChatSQLiteStore:
                   custom_title INTEGER NOT NULL DEFAULT 0,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
-                  last_message_preview TEXT NOT NULL DEFAULT ''
+                  last_message_preview TEXT NOT NULL DEFAULT '',
+                  stable_checkpoint_id TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -89,8 +88,6 @@ class ChatSQLiteStore:
                   thread_id TEXT NOT NULL,
                   role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
                   text TEXT NOT NULL,
-                  itinerary_json TEXT,
-                  followups_json TEXT,
                   debug_json TEXT,
                   created_at TEXT NOT NULL,
                   FOREIGN KEY (thread_id) REFERENCES chat_sessions(thread_id) ON DELETE CASCADE
@@ -137,8 +134,8 @@ class ChatSQLiteStore:
             conn.execute(
                 """
                 INSERT INTO chat_messages (
-                  thread_id, role, text, itinerary_json, followups_json, debug_json, created_at
-                ) VALUES (?, 'user', ?, NULL, NULL, NULL, ?)
+                  thread_id, role, text, debug_json, created_at
+                ) VALUES (?, 'user', ?, NULL, ?)
                 """,
                 (thread_id, text, now),
             )
@@ -149,9 +146,7 @@ class ChatSQLiteStore:
         thread_id: str,
         text: str,
         *,
-        itinerary: list[dict[str, Any]],
-        followups: list[str],
-        debug: dict[str, Any],
+        debug: dict[str, object],
     ) -> None:
         """写入助手消息并更新会话更新时间。"""
         now = _utc_now_iso()
@@ -159,14 +154,12 @@ class ChatSQLiteStore:
             conn.execute(
                 """
                 INSERT INTO chat_messages (
-                  thread_id, role, text, itinerary_json, followups_json, debug_json, created_at
-                ) VALUES (?, 'assistant', ?, ?, ?, ?, ?)
+                  thread_id, role, text, debug_json, created_at
+                ) VALUES (?, 'assistant', ?, ?, ?)
                 """,
                 (
                     thread_id,
                     text,
-                    json.dumps(itinerary, ensure_ascii=False),
-                    json.dumps(followups, ensure_ascii=False),
                     json.dumps(debug, ensure_ascii=False),
                     now,
                 ),
@@ -219,7 +212,7 @@ class ChatSQLiteStore:
 
             message_rows = conn.execute(
                 """
-                SELECT id, role, text, itinerary_json, followups_json, debug_json, created_at
+                SELECT id, role, text, debug_json, created_at
                 FROM chat_messages
                 WHERE thread_id = ?
                 ORDER BY id ASC
@@ -229,12 +222,7 @@ class ChatSQLiteStore:
 
         messages: list[PersistedChatMessage] = []
         for row in message_rows:
-            itinerary_payload = row["itinerary_json"]
-            followups_payload = row["followups_json"]
             debug_payload = row["debug_json"]
-
-            itinerary_data = json.loads(itinerary_payload) if itinerary_payload else []
-            followups_data = json.loads(followups_payload) if followups_payload else []
             debug_data = json.loads(debug_payload) if debug_payload else None
 
             messages.append(
@@ -242,8 +230,6 @@ class ChatSQLiteStore:
                     id=int(row["id"]),
                     role=str(row["role"]),  # type: ignore[arg-type]
                     text=str(row["text"]),
-                    itinerary=[ItineraryItem.model_validate(item) for item in itinerary_data],
-                    followups=[str(item) for item in followups_data],
                     debug=ChatDebugInfo.model_validate(debug_data) if debug_data else None,
                     created_at=str(row["created_at"]),
                 )
@@ -290,26 +276,27 @@ class ChatSQLiteStore:
             conn.commit()
             return result.rowcount > 0
 
-    def get_langchain_messages(self, thread_id: str) -> list[BaseMessage]:
-        """读取会话历史并转换为 LangChain 原生消息。"""
+    def get_stable_checkpoint_id(self, thread_id: str) -> str | None:
+        """读取会话当前记录的稳定 checkpoint id。"""
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT role, text
-                FROM chat_messages
-                WHERE thread_id = ?
-                ORDER BY id ASC
-                """,
+            row = conn.execute(
+                "SELECT stable_checkpoint_id FROM chat_sessions WHERE thread_id = ?",
                 (thread_id,),
-            ).fetchall()
+            ).fetchone()
+        if row is None:
+            return None
+        value = row["stable_checkpoint_id"]
+        return str(value) if value else None
 
-        messages: list[BaseMessage] = []
-        for row in rows:
-            role = str(row["role"])
-            content = str(row["text"])
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-                continue
-            if role == "assistant":
-                messages.append(AIMessage(content=content))
-        return messages
+    def set_stable_checkpoint_id(self, thread_id: str, checkpoint_id: str | None) -> None:
+        """更新会话当前可安全恢复的稳定 checkpoint id。"""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE chat_sessions
+                SET stable_checkpoint_id = ?
+                WHERE thread_id = ?
+                """,
+                (checkpoint_id, thread_id),
+            )
+            conn.commit()

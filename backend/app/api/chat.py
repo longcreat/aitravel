@@ -1,10 +1,12 @@
 """聊天流式 API。
 
-本模块仅提供 SSE 聊天接口 `/api/chat/stream`，用于前端实时展示模型输出。
+本模块以最薄的一层 SSE 传输 LangGraph 原生流事件，便于学习其
+`messages / updates / values` 事件结构。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import AsyncIterator
 
@@ -29,27 +31,19 @@ async def stream_chat(
     payload: ChatInvokeRequest,
     service: TravelAgentService = Depends(get_agent_service),
 ) -> StreamingResponse:
-    """以 SSE 方式返回聊天流式结果。
-
-    事件序列：
-    - start
-    - token*
-    - tool_called/tool_returned*
-    - final
-    - done
-    """
+    """以 SSE 方式返回 LangGraph 原生流事件。"""
 
     async def _stream() -> AsyncIterator[bytes]:
         try:
             async for event_name, event_payload in service.stream_invoke(payload):
                 yield _encode_sse(event_name, event_payload)
+        except asyncio.CancelledError:  # pragma: no cover - 由客户端中断触发
+            return
         except Exception as exc:  # pragma: no cover - defensive boundary
             yield _encode_sse(
                 "error",
                 StreamErrorPayload(message=f"Agent stream failed: {exc}").model_dump(),
             )
-        finally:
-            yield _encode_sse("done", {})
 
     return StreamingResponse(
         _stream(),

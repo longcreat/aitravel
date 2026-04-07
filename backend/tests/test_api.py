@@ -21,51 +21,113 @@ class _FakeService:
             "ready": True,
             "mcp_connected_servers": ["demo"],
             "mcp_errors": [],
-            "local_tools": ["estimate_trip_budget"],
+            "local_tools": ["get_current_time"],
             "mcp_tools": ["demo_search"],
         }
 
     async def stream_invoke(self, _payload):
-        yield "start", {"thread_id": "t-1", "started_at": "2026-04-05T00:00:00Z"}
-        yield "token", {
-            "chunk": {
-                "id": "chunk-1",
-                "type": "AIMessageChunk",
-                "content": "这是",
-                "name": None,
-                "chunk_position": None,
-                "tool_call_chunks": [],
-                "tool_calls": [],
-                "invalid_tool_calls": [],
-                "usage_metadata": None,
-                "response_metadata": {},
-                "additional_kwargs": {},
-            },
-            "meta": {"node": "model", "sequence": 1, "emitted_at": "2026-04-05T00:00:00Z"},
+        yield "messages", {
+            "type": "messages",
+            "ns": [],
+            "data": [
+                {
+                    "type": "AIMessageChunk",
+                    "data": {
+                        "content": "这是",
+                        "additional_kwargs": {},
+                        "response_metadata": {},
+                        "type": "AIMessageChunk",
+                        "name": None,
+                        "id": "chunk-1",
+                        "tool_calls": [],
+                        "invalid_tool_calls": [],
+                        "usage_metadata": None,
+                        "tool_call_chunks": [],
+                        "chunk_position": None,
+                    },
+                },
+                {"langgraph_node": "model"},
+            ],
         }
-        yield "token", {
-            "chunk": {
-                "id": "chunk-2",
-                "type": "AIMessageChunk",
-                "content": "一个测试回复",
-                "name": None,
-                "chunk_position": None,
-                "tool_call_chunks": [],
-                "tool_calls": [],
-                "invalid_tool_calls": [],
-                "usage_metadata": None,
-                "response_metadata": {},
-                "additional_kwargs": {},
+        yield "updates", {
+            "type": "updates",
+            "ns": [],
+            "data": {
+                "model": {
+                    "messages": [
+                        {
+                            "type": "ai",
+                            "data": {
+                                "content": "我先调用预算工具。",
+                                "additional_kwargs": {},
+                                "response_metadata": {},
+                                "type": "ai",
+                                "name": None,
+                                "id": None,
+                                "tool_calls": [{"name": "get_current_time", "args": {}, "id": "call-1", "type": "tool_call"}],
+                                "invalid_tool_calls": [],
+                                "usage_metadata": None,
+                            },
+                        }
+                    ]
+                }
             },
-            "meta": {"node": "model", "sequence": 2, "emitted_at": "2026-04-05T00:00:01Z"},
         }
-        yield "tool_called", {"tool_name": "estimate_trip_budget", "payload": {"days": 3}}
-        yield "tool_returned", {"tool_name": "estimate_trip_budget", "payload": "预算约5400元"}
-        yield "final", {
-            "assistant_message": "这是一个测试回复",
-            "itinerary": [{"day": 1, "city": "Shanghai", "activities": ["外滩"], "notes": None}],
-            "followups": ["你的预算区间是多少？"],
-            "debug": {"tool_traces": [], "mcp_connected_servers": [], "mcp_errors": []},
+        yield "messages", {
+            "type": "messages",
+            "ns": [],
+            "data": [
+                {
+                    "type": "AIMessageChunk",
+                    "data": {
+                        "content": "一个测试回复",
+                        "additional_kwargs": {},
+                        "response_metadata": {},
+                        "type": "AIMessageChunk",
+                        "name": None,
+                        "id": "chunk-2",
+                        "tool_calls": [],
+                        "invalid_tool_calls": [],
+                        "usage_metadata": None,
+                        "tool_call_chunks": [],
+                        "chunk_position": None,
+                    },
+                },
+                {"langgraph_node": "model"},
+            ],
+        }
+        yield "updates", {
+            "type": "updates",
+            "ns": [],
+            "data": {
+                "tools": {
+                    "messages": [
+                        {
+                            "type": "tool",
+                            "data": {
+                                "content": "{\"timezone\":\"Asia/Shanghai\",\"time\":\"21:02:21\"}",
+                                "additional_kwargs": {},
+                                "response_metadata": {},
+                                "type": "tool",
+                                "name": "get_current_time",
+                                "id": None,
+                                "tool_call_id": "call-1",
+                                "artifact": None,
+                                "status": "success",
+                            },
+                        }
+                    ]
+                }
+            },
+        }
+        yield "values", {
+            "type": "values",
+            "ns": [],
+            "data": {
+                "messages": [
+                    {"type": "ai", "data": {"content": "这是一个测试回复", "additional_kwargs": {}, "response_metadata": {}, "type": "ai", "name": None, "id": None, "tool_calls": [], "invalid_tool_calls": [], "usage_metadata": None}}
+                ],
+            },
         }
 
     def list_sessions(self) -> list[SessionSummary]:
@@ -157,10 +219,10 @@ def test_chat_stream_api_and_sessions_api() -> None:
 
         events = _parse_sse(response.text)
         names = [event[0] for event in events]
-        assert names == ["start", "token", "token", "tool_called", "tool_returned", "final", "done"]
-        assert events[1][1]["chunk"]["content"] == "这是"
-        assert events[1][1]["meta"]["sequence"] == 1
-        assert events[5][1]["assistant_message"] == "这是一个测试回复"
+        assert names == ["messages", "updates", "messages", "updates", "values"]
+        assert events[0][1]["data"][0]["data"]["content"] == "这是"
+        assert events[2][1]["data"][0]["data"]["content"] == "一个测试回复"
+        assert events[4][1]["data"]["messages"][0]["data"]["content"] == "这是一个测试回复"
 
         list_res = client.get("/api/sessions")
         assert list_res.status_code == 200

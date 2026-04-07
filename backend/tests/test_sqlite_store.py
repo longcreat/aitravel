@@ -14,8 +14,6 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
     store.append_assistant_message(
         thread_id,
         "好的，这里是你的建议。",
-        itinerary=[{"day": 1, "city": "Hangzhou", "activities": ["西湖"], "notes": None}],
-        followups=["预算是多少？"],
         debug={"tool_traces": [], "mcp_connected_servers": [], "mcp_errors": []},
     )
 
@@ -27,7 +25,7 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
     assert detail is not None
     assert len(detail.messages) == 2
     assert detail.messages[0].role == "user"
-    assert detail.messages[1].itinerary[0].city == "Hangzhou"
+    assert detail.messages[1].text == "好的，这里是你的建议。"
 
     renamed = store.rename_session(thread_id, "杭州周末行")
     assert renamed is not None

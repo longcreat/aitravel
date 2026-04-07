@@ -6,6 +6,7 @@ type StreamEventName = ChatStreamEvent["event"];
 
 interface StreamChatOptions {
   onEvent: (event: ChatStreamEvent) => void;
+  signal?: AbortSignal;
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
@@ -16,7 +17,7 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-const knownEventNames: StreamEventName[] = ["start", "token", "tool_called", "tool_returned", "final", "error", "done"];
+const knownEventNames: StreamEventName[] = ["messages", "updates", "values", "error"];
 
 function isKnownEventName(name: string): name is StreamEventName {
   return knownEventNames.includes(name as StreamEventName);
@@ -66,6 +67,7 @@ export async function streamChat(payload: ChatInvokeRequest, options: StreamChat
       Accept: "text/event-stream",
     },
     body: JSON.stringify(payload),
+    signal: options.signal,
   });
 
   if (!response.ok) {

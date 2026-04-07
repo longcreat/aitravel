@@ -12,23 +12,6 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 
-class ItineraryItem(BaseModel):
-    """结构化行程中的单日条目。"""
-
-    day: int = Field(..., ge=1)
-    city: str
-    activities: list[str] = Field(default_factory=list)
-    notes: str | None = None
-
-
-class StructuredTravelPlan(BaseModel):
-    """模型结构化输出的旅行计划。"""
-
-    summary: str = Field(description="A concise travel recommendation summary")
-    itinerary: list[ItineraryItem] = Field(default_factory=list)
-    followups: list[str] = Field(default_factory=list)
-
-
 class ChatInvokeRequest(BaseModel):
     """聊天请求参数。
 
@@ -58,11 +41,9 @@ class ChatDebugInfo(BaseModel):
 
 
 class ChatInvokeResponse(BaseModel):
-    """最终聊天结果（用于流式 final 事件负载）。"""
+    """最终聊天结果（供服务层内部组装与持久化）。"""
 
     assistant_message: str
-    itinerary: list[ItineraryItem] = Field(default_factory=list)
-    followups: list[str] = Field(default_factory=list)
     debug: ChatDebugInfo = Field(default_factory=ChatDebugInfo)
 
 
@@ -123,8 +104,6 @@ class PersistedChatMessage(BaseModel):
     id: int
     role: Literal["user", "assistant"]
     text: str
-    itinerary: list[ItineraryItem] = Field(default_factory=list)
-    followups: list[str] = Field(default_factory=list)
     debug: ChatDebugInfo | None = None
     created_at: str
 
