@@ -5,16 +5,28 @@ import { consumePendingAuthMessage } from "@/features/auth/model/auth.storage";
 import {
   deleteSession,
   getSession,
+  listChatModelProfiles,
   listSessions,
+  regenerateAssistantMessage,
   renameSession,
   streamChat,
+  switchAssistantVersion,
+  updateSessionModelProfile,
+  updateAssistantFeedback,
 } from "@/features/chat/api/chat.api";
 import type {
-  ChatDebugInfo,
+  AssistantVersionFeedback,
+  ChatModelProfile,
+  ChatMetaInfo,
   ChatFinalPayload,
+  ChatRenderSegment,
   ChatMessageItem,
+  SendIntentResult,
   SerializedLangChainMessage,
+  SessionDetail,
   SessionSummary,
+  StepDetailItem,
+  StepGroup,
   ToolTrace,
 } from "@/features/chat/model/chat.types";
 
@@ -29,8 +41,12 @@ function createMessageId() {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-const fallbackDebugInfo: ChatDebugInfo = {
+const fallbackMetaInfo: ChatMetaInfo = {
   tool_traces: [],
+  step_groups: [],
+  render_segments: [],
+  reasoning_text: null,
+  reasoning_state: null,
   mcp_connected_servers: [],
   mcp_errors: [],
 };
@@ -50,6 +66,9 @@ function contentToText(content: unknown): string {
           if (typed.type === "text" && typeof typed.text === "string") {
             return typed.text;
           }
+          if (typed.type === "reasoning" || typed.type === "reasoning_content") {
+            return "";
+          }
         }
         try {
           return JSON.stringify(item);
@@ -63,6 +82,66 @@ function contentToText(content: unknown): string {
     return "";
   }
   return String(content);
+}
+
+function contentToReasoningText(content: unknown): string {
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .flatMap((item) => {
+      if (!item || typeof item !== "object") {
+        return [];
+      }
+
+      const typed = item as {
+        type?: unknown;
+        reasoning?: unknown;
+        reasoning_content?: unknown;
+        summary?: unknown;
+        text?: unknown;
+      };
+
+      if (typed.type !== "reasoning" && typed.type !== "reasoning_content") {
+        return [];
+      }
+
+      const chunks: string[] = [];
+      if (typeof typed.reasoning === "string" && typed.reasoning) {
+        chunks.push(typed.reasoning);
+      }
+      if (typeof typed.reasoning_content === "string" && typed.reasoning_content) {
+        chunks.push(typed.reasoning_content);
+      }
+      if (typed.type === "reasoning_content" && typeof typed.text === "string" && typed.text) {
+        chunks.push(typed.text);
+      }
+      if (Array.isArray(typed.summary)) {
+        for (const summaryItem of typed.summary) {
+          if (
+            summaryItem &&
+            typeof summaryItem === "object" &&
+            "type" in summaryItem &&
+            "text" in summaryItem &&
+            (summaryItem as { type?: unknown }).type === "summary_text" &&
+            typeof (summaryItem as { text?: unknown }).text === "string"
+          ) {
+            chunks.push((summaryItem as { text: string }).text);
+          }
+        }
+      }
+      return chunks;
+    })
+    .join("");
+}
+
+function extractReasoningTextFromSerializedMessage(message: SerializedLangChainMessage): string {
+  const reasoningFromAdditionalKwargs = message.data.additional_kwargs?.reasoning_content;
+  if (typeof reasoningFromAdditionalKwargs === "string" && reasoningFromAdditionalKwargs.trim()) {
+    return reasoningFromAdditionalKwargs;
+  }
+  return contentToReasoningText(message.data.content);
 }
 
 function isSerializedLangChainMessage(value: unknown): value is SerializedLangChainMessage {
@@ -106,6 +185,9 @@ function extractLatestAssistantText(payload: unknown): string {
       break;
     }
     if (message && (message.type === "ai" || message.type === "AIMessage")) {
+      if ((message.data.tool_calls?.length ?? 0) > 0) {
+        continue;
+      }
       const text = contentToText(message.data.content);
       if (text) return text;
     }
@@ -143,6 +225,8 @@ function collectToolTraces(
           phase: "called",
           tool_name: toolName,
           payload: args,
+          tool_call_id: callId,
+          result_status: null,
         });
       }
       continue;
@@ -163,15 +247,226 @@ function collectToolTraces(
       phase: "returned",
       tool_name: toolName,
       payload: payloadText,
+      tool_call_id: returnedKey,
+      result_status: message.data.status === "error" ? "error" : "success",
     });
   }
 
   return traces;
 }
 
+function cloneStepGroups(stepGroups: StepGroup[]): StepGroup[] {
+  return stepGroups.map((group) => ({
+    id: group.id,
+    items: group.items.map((item) => ({ ...item })),
+  }));
+}
+
+function cloneRenderSegments(renderSegments: ChatRenderSegment[]): ChatRenderSegment[] {
+  return renderSegments.map((segment) => ({ ...segment }));
+}
+
+function appendTextSegment(renderSegments: ChatRenderSegment[], chunkText: string) {
+  if (!chunkText) {
+    return;
+  }
+
+  const lastSegment = renderSegments[renderSegments.length - 1];
+  if (lastSegment?.type === "text") {
+    lastSegment.text += chunkText;
+    return;
+  }
+
+  renderSegments.push({
+    type: "text",
+    text: chunkText,
+  });
+}
+
+function getVisibleTextFromSegments(renderSegments: ChatRenderSegment[]): string {
+  return renderSegments
+    .filter((segment): segment is Extract<ChatRenderSegment, { type: "text" }> => segment.type === "text")
+    .map((segment) => segment.text)
+    .join("");
+}
+
+function formatToolName(toolName: string): string {
+  return toolName.replace(/[_-]+/g, " ").trim();
+}
+
+function summarizeToolPayload(payload: unknown, status: "running" | "success" | "error"): string {
+  if (status === "running") {
+    return "Running";
+  }
+
+  const text = contentToText(payload).trim();
+  if (text && text.length <= 80 && !/^[\[{]/.test(text)) {
+    return text;
+  }
+
+  return status === "error" ? "Returned an error" : "Completed";
+}
+
+function getOrCreateCurrentStepGroup(stepGroups: StepGroup[], renderSegments: ChatRenderSegment[]): StepGroup {
+  const lastSegment = renderSegments[renderSegments.length - 1];
+  if (lastSegment?.type === "step") {
+    const existing = stepGroups.find((group) => group.id === lastSegment.step_group_id);
+    if (existing) {
+      return existing;
+    }
+  }
+
+  const nextGroup: StepGroup = {
+    id: `step-${stepGroups.length + 1}`,
+    items: [],
+  };
+  stepGroups.push(nextGroup);
+  renderSegments.push({
+    type: "step",
+    step_group_id: nextGroup.id,
+  });
+  return nextGroup;
+}
+
+function findExistingStepItem(stepGroups: StepGroup[], toolCallId: string) {
+  for (let groupIndex = stepGroups.length - 1; groupIndex >= 0; groupIndex -= 1) {
+    const item = stepGroups[groupIndex].items.find((candidate) => candidate.id === toolCallId);
+    if (item) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function applyToolTraceToPresentation(
+  trace: ToolTrace,
+  stepGroups: StepGroup[],
+  renderSegments: ChatRenderSegment[],
+) {
+  const normalizedToolName = formatToolName(trace.tool_name);
+  const normalizedCallId = trace.tool_call_id ?? `${trace.tool_name}-${stepGroups.length + 1}-${Date.now()}`;
+
+  if (trace.phase === "called") {
+    const stepGroup = getOrCreateCurrentStepGroup(stepGroups, renderSegments);
+    const existing = stepGroup.items.find((item) => item.id === normalizedCallId);
+    if (existing) {
+      existing.tool_name = normalizedToolName;
+      existing.status = "running";
+      existing.summary = summarizeToolPayload(trace.payload, "running");
+      return;
+    }
+
+    stepGroup.items.push({
+      id: normalizedCallId,
+      tool_name: normalizedToolName,
+      status: "running",
+      summary: summarizeToolPayload(trace.payload, "running"),
+    });
+    return;
+  }
+
+  const resolvedStatus: StepDetailItem["status"] = trace.result_status === "error" ? "error" : "success";
+  const existingItem = findExistingStepItem(stepGroups, normalizedCallId);
+  if (existingItem) {
+    existingItem.tool_name = normalizedToolName;
+    existingItem.status = resolvedStatus;
+    existingItem.summary = summarizeToolPayload(trace.payload, resolvedStatus);
+    return;
+  }
+
+  const stepGroup = getOrCreateCurrentStepGroup(stepGroups, renderSegments);
+  stepGroup.items.push({
+    id: normalizedCallId,
+    tool_name: normalizedToolName,
+    status: resolvedStatus,
+    summary: summarizeToolPayload(trace.payload, resolvedStatus),
+  });
+}
+
+function sliceMessagesAfterLatestHuman(messages: SerializedLangChainMessage[]): SerializedLangChainMessage[] {
+  let startIndex = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    const messageType = messages[index]?.type;
+    if (messageType === "human" || messageType === "HumanMessage") {
+      startIndex = index + 1;
+    }
+  }
+  return messages.slice(startIndex);
+}
+
+function buildPresentationFromSerializedMessages(payload: unknown) {
+  const relevantMessages = sliceMessagesAfterLatestHuman(collectSerializedMessages(payload));
+  const stepGroups: StepGroup[] = [];
+  const renderSegments: ChatRenderSegment[] = [];
+  const reasoningChunks: string[] = [];
+
+  for (const message of relevantMessages) {
+    if (message.type === "ai" || message.type === "AIMessage") {
+      const reasoningText = extractReasoningTextFromSerializedMessage(message);
+      if (reasoningText) {
+        reasoningChunks.push(reasoningText);
+      }
+
+      const text = contentToText(message.data.content);
+      if (text) {
+        appendTextSegment(renderSegments, text);
+      }
+
+      const toolCalls = message.data.tool_calls ?? [];
+      if (!toolCalls.length) {
+        continue;
+      }
+
+      const stepGroup = getOrCreateCurrentStepGroup(stepGroups, renderSegments);
+      for (const call of toolCalls) {
+        const normalizedCallId = String(call?.id ?? `${call?.name ?? "tool"}-${stepGroup.items.length + 1}`);
+        const existing = stepGroup.items.find((item) => item.id === normalizedCallId);
+        if (existing) {
+          continue;
+        }
+        stepGroup.items.push({
+          id: normalizedCallId,
+          tool_name: formatToolName(String(call?.name ?? "unknown")),
+          status: "running",
+          summary: summarizeToolPayload(call?.args ?? {}, "running"),
+        });
+      }
+      continue;
+    }
+
+    if (message.type !== "tool") {
+      continue;
+    }
+
+    const resolvedStatus: StepDetailItem["status"] = message.data.status === "error" ? "error" : "success";
+    const normalizedCallId = String(message.data.tool_call_id ?? `${message.data.name ?? "tool"}-${stepGroups.length + 1}`);
+    const existingItem = findExistingStepItem(stepGroups, normalizedCallId);
+    if (existingItem) {
+      existingItem.status = resolvedStatus;
+      existingItem.summary = summarizeToolPayload(message.data.content, resolvedStatus);
+      continue;
+    }
+
+    const stepGroup = getOrCreateCurrentStepGroup(stepGroups, renderSegments);
+    stepGroup.items.push({
+      id: normalizedCallId,
+      tool_name: formatToolName(String(message.data.name ?? "unknown")),
+      status: resolvedStatus,
+      summary: summarizeToolPayload(message.data.content, resolvedStatus),
+    });
+  }
+
+  return {
+    assistantMessage: getVisibleTextFromSegments(renderSegments),
+    reasoningText: reasoningChunks.join(""),
+    stepGroups,
+    renderSegments,
+  };
+}
+
 function buildFinalPayloadFromValues(
   payload: unknown,
-  streamedText: string,
+  fallbackAssistantText: string,
   streamedToolTraces: ToolTrace[],
 ): ChatFinalPayload | null {
   if (!payload || typeof payload !== "object") {
@@ -179,36 +474,75 @@ function buildFinalPayloadFromValues(
   }
 
   const typedPayload = payload as { messages?: unknown };
-  const assistantMessage = extractLatestAssistantText(typedPayload.messages) || streamedText;
+  const presentation = buildPresentationFromSerializedMessages(typedPayload.messages);
+  const assistantMessage = presentation.assistantMessage || fallbackAssistantText;
 
-  if (!assistantMessage) {
+  if (!assistantMessage && !presentation.reasoningText && !streamedToolTraces.length && !presentation.renderSegments.length) {
     return null;
   }
 
   return {
-    assistant_message: assistantMessage,
-    debug: {
-      ...fallbackDebugInfo,
+    assistant_message: assistantMessage || "",
+    meta: {
+      ...fallbackMetaInfo,
       tool_traces: [...streamedToolTraces],
+      step_groups: cloneStepGroups(presentation.stepGroups),
+      render_segments: cloneRenderSegments(presentation.renderSegments),
+      reasoning_text: presentation.reasoningText || null,
+      reasoning_state: presentation.reasoningText ? "completed" : null,
     },
   };
 }
 
-export function useChatAgent() {
+function toChatMessageItems(detailMessages: SessionDetail["messages"]): ChatMessageItem[] {
+  return detailMessages.map((message) => ({
+    id: `persisted-${message.id}`,
+    role: message.role,
+    text: message.text,
+    meta: message.meta ?? undefined,
+    current_version_id: message.current_version_id ?? undefined,
+    versions: message.versions ?? [],
+    can_regenerate: message.can_regenerate ?? false,
+  }));
+}
+
+export function useChatAgent(initialThreadId?: string) {
   const { isAuthenticated, openAuthModal, ready } = useAuth();
-  const [threadId, setThreadId] = useState<string>(() => createThreadId());
+  const [threadId, setThreadId] = useState<string>(() => initialThreadId ?? createThreadId());
   const [messages, setMessages] = useState<ChatMessageItem[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsReady, setSessionsReady] = useState(false);
+  const [modelProfiles, setModelProfiles] = useState<ChatModelProfile[]>([]);
+  const [defaultModelProfileKey, setDefaultModelProfileKey] = useState("");
+  const [selectedModelProfileKey, setSelectedModelProfileKey] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastSubmittedMessageRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeThreadIdRef = useRef(threadId);
+  const requestInFlightRef = useRef(false);
+  const previousDefaultModelProfileKeyRef = useRef("");
 
-  const canSend = useMemo(() => !loading, [loading]);
+  useEffect(() => {
+    activeThreadIdRef.current = threadId;
+  }, [threadId]);
+
+  const canStartRequest = useMemo(() => ready && !loading, [loading, ready]);
+  const currentThreadIsPersisted = useMemo(
+    () =>
+      sessions.some((session) => session.thread_id === threadId) ||
+      messages.some((message) => message.id.startsWith("persisted-")),
+    [messages, sessions, threadId],
+  );
+  const selectedModelProfile = useMemo(
+    () => modelProfiles.find((profile) => profile.key === selectedModelProfileKey) ?? null,
+    [modelProfiles, selectedModelProfileKey],
+  );
 
   const refreshSessions = useCallback(async () => {
     if (!isAuthenticated) {
       setSessions([]);
+      setSessionsReady(true);
       return;
     }
     try {
@@ -216,8 +550,44 @@ export function useChatAgent() {
       setSessions(next);
     } catch {
       // 会话列表失败不阻断聊天主链路。
+    } finally {
+      setSessionsReady(true);
     }
   }, [isAuthenticated]);
+
+  const refreshModelProfiles = useCallback(async () => {
+    try {
+      const response = await listChatModelProfiles();
+      setModelProfiles(response.profiles);
+      setDefaultModelProfileKey(response.default_profile_key);
+      setSelectedModelProfileKey((current) => {
+        const previousDefault = previousDefaultModelProfileKeyRef.current;
+        previousDefaultModelProfileKeyRef.current = response.default_profile_key;
+        if (!current || current === previousDefault) {
+          return response.default_profile_key;
+        }
+        if (response.profiles.some((profile) => profile.key === current)) {
+          return current;
+        }
+        return response.default_profile_key;
+      });
+    } catch {
+      setModelProfiles([]);
+    }
+  }, []);
+
+  const hydrateThreadMessages = useCallback(async (targetThreadId: string) => {
+    const detail = await getSession(targetThreadId);
+    if (activeThreadIdRef.current === targetThreadId) {
+      setMessages(toChatMessageItems(detail.messages));
+      setSelectedModelProfileKey(detail.model_profile_key);
+    }
+    return detail;
+  }, []);
+
+  useEffect(() => {
+    void refreshModelProfiles();
+  }, [refreshModelProfiles]);
 
   useEffect(() => {
     if (!ready) {
@@ -227,33 +597,29 @@ export function useChatAgent() {
   }, [ready, refreshSessions]);
 
   const startNewSession = useCallback(() => {
-    setThreadId(createThreadId());
+    const nextThreadId = createThreadId();
+    activeThreadIdRef.current = nextThreadId;
+    setThreadId(nextThreadId);
     setMessages([]);
     setError(null);
-  }, []);
+    setSelectedModelProfileKey(defaultModelProfileKey);
+    return nextThreadId;
+  }, [defaultModelProfileKey]);
 
   const openSession = useCallback(async (targetThreadId: string) => {
     setLoading(true);
     setError(null);
     try {
-      const detail = await getSession(targetThreadId);
+      activeThreadIdRef.current = targetThreadId;
       setThreadId(targetThreadId);
-
-      const restored = detail.messages.map((message) => ({
-        id: `persisted-${message.id}`,
-        role: message.role,
-        text: message.text,
-        debug: message.debug ?? undefined,
-      }));
-
-      setMessages(restored);
+      await hydrateThreadMessages(targetThreadId);
     } catch (openError) {
       const message = openError instanceof Error ? openError.message : "加载会话失败";
       setError(message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [hydrateThreadMessages]);
 
   const renameSessionTitle = useCallback(
     async (targetThreadId: string, title: string) => {
@@ -275,37 +641,67 @@ export function useChatAgent() {
     [refreshSessions, startNewSession, threadId],
   );
 
-  async function sendMessage(text: string) {
-    const normalized = text.trim();
-    if (!normalized || !canSend) {
-      return;
-    }
-    if (!ready) {
-      return;
-    }
-    if (!isAuthenticated) {
-      openAuthModal({
-        redirectTo: "/chat",
-        initialMode: "login",
-        pendingMessage: normalized,
-      });
-      return;
-    }
+  const updateCurrentModelProfile = useCallback(
+    async (nextModelProfileKey: string) => {
+      setSelectedModelProfileKey(nextModelProfileKey);
 
+      if (!isAuthenticated || !currentThreadIsPersisted) {
+        return;
+      }
+
+      const previousModelProfileKey = selectedModelProfileKey;
+      try {
+        await updateSessionModelProfile(threadId, { model_profile_key: nextModelProfileKey });
+      } catch (updateError) {
+        setSelectedModelProfileKey(previousModelProfileKey);
+        const message = updateError instanceof Error ? updateError.message : "切换模型失败";
+        setError(message);
+      }
+    },
+    [currentThreadIsPersisted, isAuthenticated, selectedModelProfileKey, threadId],
+  );
+
+  const prepareSendIntent = useCallback(
+    (text: string): SendIntentResult => {
+      const normalized = text.trim();
+      if (!normalized) {
+        return { status: "blocked", reason: "empty" };
+      }
+      if (loading || requestInFlightRef.current) {
+        return { status: "blocked", reason: "loading" };
+      }
+      if (!ready) {
+        return { status: "blocked", reason: "not_ready" };
+      }
+      if (!isAuthenticated) {
+        return { status: "auth_required", message: normalized };
+      }
+      return { status: "accepted", message: normalized };
+    },
+    [isAuthenticated, loading, ready],
+  );
+
+  async function executeSend(normalized: string, modelProfileKeyOverride?: string | null): Promise<void> {
+    requestInFlightRef.current = true;
     setError(null);
+    const effectiveModelProfileKey = (modelProfileKeyOverride ?? selectedModelProfileKey) || null;
 
     const userMessageId = createMessageId();
     const assistantMessageId = createMessageId();
+    const targetThreadId = threadId;
     const streamedToolTraces: ToolTrace[] = [];
+    const streamedStepGroups: StepGroup[] = [];
+    const streamedRenderSegments: ChatRenderSegment[] = [];
+    let streamedReasoningText = "";
     const seenCalled = new Set<string>();
     const seenReturned = new Set<string>();
-    let streamedText = "";
     let hasValuesResult = false;
+    let shouldHydratePersistedThread = false;
 
     setMessages((prev) => [
       ...prev,
       { id: userMessageId, role: "user", text: normalized },
-      { id: assistantMessageId, role: "assistant", text: "", status: "streaming" },
+      { id: assistantMessageId, role: "assistant", text: "", status: "streaming", versions: [], can_regenerate: false },
     ]);
     setLoading(true);
     lastSubmittedMessageRef.current = normalized;
@@ -316,12 +712,27 @@ export function useChatAgent() {
       setMessages((prev) => prev.map((item) => (item.id === assistantMessageId ? updater(item) : item)));
     };
 
+    const buildStreamingMeta = (draftMeta?: ChatMetaInfo): ChatMetaInfo => ({
+      ...(draftMeta ?? fallbackMetaInfo),
+      tool_traces: [...streamedToolTraces],
+      step_groups: cloneStepGroups(streamedStepGroups),
+      render_segments: cloneRenderSegments(streamedRenderSegments),
+      reasoning_text: streamedReasoningText || draftMeta?.reasoning_text || null,
+      reasoning_state: streamedReasoningText ? "streaming" : (draftMeta?.reasoning_state ?? null),
+    });
+
+    const buildSettledMeta = (draftMeta?: ChatMetaInfo): ChatMetaInfo => ({
+      ...buildStreamingMeta(draftMeta),
+      reasoning_state: streamedReasoningText ? "completed" : (draftMeta?.reasoning_state ?? null),
+    });
+
     try {
       await streamChat(
         {
-          thread_id: threadId,
+          thread_id: targetThreadId,
           user_message: normalized,
           locale: "zh-CN",
+          model_profile_key: effectiveModelProfileKey,
           session_meta: {},
         },
         {
@@ -333,10 +744,23 @@ export function useChatAgent() {
                 return;
               }
 
-              streamedText += contentToText(chunk.data.content);
+              const chunkText = contentToText(chunk.data.content);
+              const chunkReasoningText = extractReasoningTextFromSerializedMessage(chunk);
+              if (!chunkText && !chunkReasoningText) {
+                return;
+              }
+
+              if (chunkReasoningText) {
+                streamedReasoningText += chunkReasoningText;
+              }
+
+              if (chunkText) {
+                appendTextSegment(streamedRenderSegments, chunkText);
+              }
               patchAssistantMessage((draft) => ({
                 ...draft,
-                text: streamedText,
+                text: getVisibleTextFromSegments(streamedRenderSegments),
+                meta: buildStreamingMeta(draft.meta),
                 status: "streaming",
               }));
               return;
@@ -349,29 +773,39 @@ export function useChatAgent() {
               }
 
               streamedToolTraces.push(...newTraces);
+              for (const trace of newTraces) {
+                applyToolTraceToPresentation(trace, streamedStepGroups, streamedRenderSegments);
+              }
               patchAssistantMessage((draft) => ({
                 ...draft,
-                debug: {
-                  ...(draft.debug ?? fallbackDebugInfo),
-                  tool_traces: [...streamedToolTraces],
-                },
+                meta: buildStreamingMeta(draft.meta),
                 status: "streaming",
               }));
               return;
             }
 
             if (event.event === "values") {
-              const finalPayload = buildFinalPayloadFromValues(event.data.data, streamedText, streamedToolTraces);
+              const finalPayload = buildFinalPayloadFromValues(
+                event.data.data,
+                getVisibleTextFromSegments(streamedRenderSegments),
+                streamedToolTraces,
+              );
               if (!finalPayload) {
                 return;
               }
 
-              hasValuesResult = true;
+              const hasStableAssistantMessage = Boolean(finalPayload.assistant_message.trim());
+              if (hasStableAssistantMessage) {
+                hasValuesResult = true;
+                shouldHydratePersistedThread = true;
+              }
+              // Keep status as "streaming" even when values arrive — the stream may continue
+              // with more tool calls. Status will be cleared only after streamChat resolves.
               patchAssistantMessage((draft) => ({
                 ...draft,
-                text: finalPayload.assistant_message || streamedText || draft.text,
-                status: undefined,
-                debug: finalPayload.debug,
+                text: finalPayload.assistant_message || draft.text || getVisibleTextFromSegments(streamedRenderSegments),
+                status: "streaming",
+                meta: finalPayload.meta,
               }));
               return;
             }
@@ -381,10 +815,11 @@ export function useChatAgent() {
               patchAssistantMessage((draft) => ({
                 ...draft,
                 text:
-                  streamedText ||
+                  getVisibleTextFromSegments(streamedRenderSegments) ||
                   draft.text ||
                   "当前请求失败，可能是网络或后端服务异常。你可以重试，或先告诉我你希望去哪里。",
                 status: undefined,
+                meta: buildSettledMeta(draft.meta),
               }));
             }
           },
@@ -394,9 +829,9 @@ export function useChatAgent() {
       if (!hasValuesResult) {
         patchAssistantMessage((draft) => ({
           ...draft,
-          text: streamedText || draft.text || "当前未拿到完整响应，请重试。",
+          text: getVisibleTextFromSegments(streamedRenderSegments) || draft.text || "当前未拿到完整响应，请重试。",
           status: draft.status === "stopped" ? "stopped" : undefined,
-          debug: draft.debug ?? { ...fallbackDebugInfo, tool_traces: [...streamedToolTraces] },
+          meta: buildSettledMeta(draft.meta),
         }));
       }
     } catch (invokeError) {
@@ -408,7 +843,12 @@ export function useChatAgent() {
           ...draft,
           text: draft.text || "已停止生成",
           status: "stopped",
-          debug: draft.debug ?? { ...fallbackDebugInfo, tool_traces: [...streamedToolTraces] },
+          meta: draft.meta ?? {
+            ...fallbackMetaInfo,
+            tool_traces: [...streamedToolTraces],
+            step_groups: cloneStepGroups(streamedStepGroups),
+            render_segments: cloneRenderSegments(streamedRenderSegments),
+          },
         }));
         return;
       }
@@ -418,18 +858,246 @@ export function useChatAgent() {
       patchAssistantMessage((draft) => ({
         ...draft,
         text:
-          streamedText ||
+          getVisibleTextFromSegments(streamedRenderSegments) ||
           draft.text ||
           "当前请求失败，可能是网络或后端服务异常。你可以重试，或先告诉我你希望去哪里。",
         status: undefined,
-        debug: draft.debug ?? { ...fallbackDebugInfo, tool_traces: [...streamedToolTraces] },
+        meta: buildSettledMeta(draft.meta),
       }));
+    } finally {
+      // Stream is fully done — clear the streaming status so the copy button becomes visible.
+      // If hasValuesResult is true the status is still "streaming" (we deferred clearing it).
+      // Hydration below will overwrite the message anyway, but this is a reliable safety net.
+      if (hasValuesResult) {
+        patchAssistantMessage((draft) => ({
+          ...draft,
+          status: draft.status === "stopped" ? "stopped" : undefined,
+        }));
+      }
+      requestInFlightRef.current = false;
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null;
+      }
+      setLoading(false);
+      await refreshSessions();
+      if (shouldHydratePersistedThread && activeThreadIdRef.current === targetThreadId) {
+        try {
+          await hydrateThreadMessages(targetThreadId);
+        } catch {
+          // 历史回填失败时保留当前流式结果，避免把已展示内容清空。
+        }
+      }
+    }
+  }
+
+  async function sendMessage(
+    text: string,
+    options?: { modelProfileKey?: string | null },
+  ): Promise<SendIntentResult> {
+    const intent = prepareSendIntent(text);
+    if (intent.status === "auth_required") {
+      openAuthModal({
+        redirectTo: "/chat",
+        initialMode: "login",
+        pendingMessage: {
+          message: intent.message,
+          model_profile_key: (options?.modelProfileKey ?? selectedModelProfileKey) || null,
+        },
+      });
+      return intent;
+    }
+
+    if (intent.status !== "accepted") {
+      return intent;
+    }
+
+    void executeSend(intent.message, options?.modelProfileKey);
+    return intent;
+  }
+
+  async function regenerateLatestAssistantMessage(messageId: number) {
+    if (loading || !isAuthenticated) {
+      return;
+    }
+
+    const targetThreadId = threadId;
+    const targetMessageKey = `persisted-${messageId}`;
+    const streamedToolTraces: ToolTrace[] = [];
+    const streamedStepGroups: StepGroup[] = [];
+    const streamedRenderSegments: ChatRenderSegment[] = [];
+    let streamedReasoningText = "";
+    const seenCalled = new Set<string>();
+    const seenReturned = new Set<string>();
+    let shouldHydratePersistedThread = false;
+    let hasStableAssistantMessage = false;
+    const previousAssistantSnapshot =
+      messages.find((item) => item.id === targetMessageKey) ?? null;
+
+    setError(null);
+    setLoading(true);
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
+    const patchAssistantMessage = (updater: (draft: ChatMessageItem) => ChatMessageItem) => {
+      setMessages((prev) => prev.map((item) => (item.id === targetMessageKey ? updater(item) : item)));
+    };
+
+    const buildStreamingMeta = (draftMeta?: ChatMetaInfo): ChatMetaInfo => ({
+      ...(draftMeta ?? fallbackMetaInfo),
+      tool_traces: [...streamedToolTraces],
+      step_groups: cloneStepGroups(streamedStepGroups),
+      render_segments: cloneRenderSegments(streamedRenderSegments),
+      reasoning_text: streamedReasoningText || draftMeta?.reasoning_text || null,
+      reasoning_state: streamedReasoningText ? "streaming" : (draftMeta?.reasoning_state ?? null),
+    });
+
+    patchAssistantMessage((draft) => ({
+      ...draft,
+      status: "streaming",
+      can_regenerate: false,
+    }));
+
+    try {
+      await regenerateAssistantMessage(targetThreadId, messageId, {
+        signal: abortController.signal,
+        onEvent: (event) => {
+          if (event.event === "messages") {
+            const chunk = extractMessageChunk(event.data.data);
+            if (!chunk) {
+              return;
+            }
+            const chunkText = contentToText(chunk.data.content);
+            const chunkReasoningText = extractReasoningTextFromSerializedMessage(chunk);
+            if (!chunkText && !chunkReasoningText) {
+              return;
+            }
+            if (chunkReasoningText) {
+              streamedReasoningText += chunkReasoningText;
+            }
+            if (chunkText) {
+              appendTextSegment(streamedRenderSegments, chunkText);
+            }
+            patchAssistantMessage((draft) => ({
+              ...draft,
+              text: getVisibleTextFromSegments(streamedRenderSegments),
+              meta: buildStreamingMeta(draft.meta),
+              status: "streaming",
+            }));
+            return;
+          }
+
+          if (event.event === "updates") {
+            const newTraces = collectToolTraces(event.data.data, seenCalled, seenReturned);
+            if (!newTraces.length) {
+              return;
+            }
+
+            streamedToolTraces.push(...newTraces);
+            for (const trace of newTraces) {
+              applyToolTraceToPresentation(trace, streamedStepGroups, streamedRenderSegments);
+            }
+            patchAssistantMessage((draft) => ({
+              ...draft,
+              meta: buildStreamingMeta(draft.meta),
+              status: "streaming",
+            }));
+            return;
+          }
+
+          if (event.event === "values") {
+            const finalPayload = buildFinalPayloadFromValues(
+              event.data.data,
+              getVisibleTextFromSegments(streamedRenderSegments),
+              streamedToolTraces,
+            );
+            if (!finalPayload) {
+              return;
+            }
+
+            const nextHasStableAssistantMessage = Boolean(finalPayload.assistant_message.trim());
+            if (nextHasStableAssistantMessage) {
+              hasStableAssistantMessage = true;
+              shouldHydratePersistedThread = true;
+            }
+
+            // Keep status as "streaming" — the stream may have more nodes to emit.
+            // Status is cleared only after the stream fully resolves (in the finally block).
+            patchAssistantMessage((draft) => ({
+              ...draft,
+              text:
+                finalPayload.assistant_message ||
+                draft.text ||
+                getVisibleTextFromSegments(streamedRenderSegments),
+              status: "streaming",
+              meta: finalPayload.meta,
+            }));
+            return;
+          }
+
+          if (event.event === "error") {
+            setError(event.data.message);
+          }
+        },
+      });
+    } catch (regenerateError) {
+      if (
+        (regenerateError instanceof DOMException && regenerateError.name === "AbortError") ||
+        (regenerateError instanceof Error && regenerateError.name === "AbortError")
+      ) {
+        return;
+      }
+
+      const message = regenerateError instanceof Error ? regenerateError.message : "重新生成失败";
+      setError(message);
     } finally {
       if (abortControllerRef.current === abortController) {
         abortControllerRef.current = null;
       }
       setLoading(false);
       await refreshSessions();
+      // Stream fully ended — clear streaming status now that we know whether we succeeded.
+      if (hasStableAssistantMessage) {
+        patchAssistantMessage((draft) => ({
+          ...draft,
+          status: draft.status === "stopped" ? "stopped" : undefined,
+        }));
+      }
+      if (!hasStableAssistantMessage && previousAssistantSnapshot) {
+        setMessages((prev) =>
+          prev.map((item) =>
+            item.id === targetMessageKey
+              ? {
+                  ...previousAssistantSnapshot,
+                  status: undefined,
+                }
+              : item,
+          ),
+        );
+      }
+      if (shouldHydratePersistedThread && activeThreadIdRef.current === targetThreadId) {
+        try {
+          await hydrateThreadMessages(targetThreadId);
+        } catch {
+          // 保留当前可见结果，不因回填失败清空消息。
+        }
+      }
+    }
+  }
+
+  async function selectAssistantVersion(messageId: number, versionId: number) {
+    const targetThreadId = threadId;
+    await switchAssistantVersion(targetThreadId, messageId, { version_id: versionId });
+    if (activeThreadIdRef.current === targetThreadId) {
+      await hydrateThreadMessages(targetThreadId);
+    }
+    await refreshSessions();
+  }
+
+  async function setAssistantFeedback(messageId: number, versionId: number, feedback: AssistantVersionFeedback) {
+    const targetThreadId = threadId;
+    await updateAssistantFeedback(targetThreadId, messageId, versionId, { feedback });
+    if (activeThreadIdRef.current === targetThreadId) {
+      await hydrateThreadMessages(targetThreadId);
     }
   }
 
@@ -449,28 +1117,41 @@ export function useChatAgent() {
     if (!ready || !isAuthenticated || loading) {
       return;
     }
-    const pendingMessage = consumePendingAuthMessage();
-    if (!pendingMessage) {
+    const pendingIntent = consumePendingAuthMessage();
+    if (!pendingIntent) {
       return;
     }
-    void sendMessage(pendingMessage);
+    if (pendingIntent.model_profile_key) {
+      setSelectedModelProfileKey(pendingIntent.model_profile_key);
+    }
+    void sendMessage(pendingIntent.message, {
+      modelProfileKey: pendingIntent.model_profile_key ?? null,
+    });
   }, [isAuthenticated, loading, ready]);
 
   return {
     threadId,
     messages,
     sessions,
+    sessionsReady,
+    modelProfiles,
+    defaultModelProfileKey,
+    selectedModelProfileKey,
+    selectedModelProfile,
     loading,
     error,
     isAuthenticated,
-    canSend,
+    canStartRequest,
     sendMessage,
     openSession,
     renameSessionTitle,
     removeSession,
     startNewSession,
     stopGenerating,
+    regenerateLatestAssistantMessage,
+    selectAssistantVersion,
+    setAssistantFeedback,
+    updateCurrentModelProfile,
     retryLastSubmittedMessage,
-    refreshSessions,
   };
 }

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.agent.service import TravelAgentService
 from app.auth.service import AuthService
+from app.db.bootstrap import bootstrap_sqlite_database
 from app.schemas.auth import AuthUser
 
 
@@ -23,15 +23,14 @@ def get_agent_service() -> TravelAgentService:
     """
     backend_root = Path(__file__).resolve().parents[2]
     config_path = backend_root / "config" / "mcp.servers.json"
-    sqlite_path = Path(os.getenv("CHAT_SQLITE_PATH", str(backend_root / "data" / "chat.db")))
+    sqlite_path = bootstrap_sqlite_database()
     return TravelAgentService(mcp_config_path=config_path, sqlite_db_path=sqlite_path)
 
 
 @lru_cache
 def get_auth_service() -> AuthService:
     """返回全局单例 `AuthService`。"""
-    backend_root = Path(__file__).resolve().parents[2]
-    sqlite_path = Path(os.getenv("CHAT_SQLITE_PATH", str(backend_root / "data" / "chat.db")))
+    sqlite_path = bootstrap_sqlite_database()
     return AuthService(sqlite_db_path=sqlite_path)
 
 

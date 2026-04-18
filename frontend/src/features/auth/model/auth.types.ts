@@ -14,7 +14,6 @@ export interface SendCodeRequest {
 }
 
 export interface SendCodeResponse {
-  sent: boolean;
   expires_in: number;
 }
 
@@ -28,4 +27,9 @@ export interface AuthTokenPayload {
   access_token: string;
   token_type: "bearer";
   user: AuthUser;
+}
+
+export interface PendingAuthMessagePayload {
+  message: string;
+  model_profile_key?: string | null;
 }

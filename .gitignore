@@ -63,3 +63,4 @@ backend/pytest-cache-files-*
 # Generated local files
 frontend/vite.config.js
 frontend/vite.config.d.ts
+*.sql

@@ -12,6 +12,9 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 
+ChatModelProfileKind = Literal["standard", "thinking"]
+
+
 class ChatInvokeRequest(BaseModel):
     """聊天请求参数。
 
@@ -21,6 +24,7 @@ class ChatInvokeRequest(BaseModel):
     thread_id: str = Field(default_factory=lambda: str(uuid4()))
     user_message: str = Field(min_length=1, max_length=4000)
     locale: str = Field(default="zh-CN")
+    model_profile_key: str | None = None
     session_meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -30,66 +34,72 @@ class ToolTrace(BaseModel):
     phase: Literal["called", "returned"]
     tool_name: str
     payload: Any = None
+    tool_call_id: str | None = None
+    result_status: Literal["success", "error"] | None = None
 
 
-class ChatDebugInfo(BaseModel):
-    """聊天调试信息集合。"""
+class StepDetailItem(BaseModel):
+    """单条工具步骤详情。"""
+
+    id: str
+    tool_name: str
+    status: Literal["running", "success", "error"]
+    summary: str
+
+
+class StepGroup(BaseModel):
+    """连续工具调用区间的聚合结果。"""
+
+    id: str
+    items: list[StepDetailItem] = Field(default_factory=list)
+
+
+class RenderTextSegment(BaseModel):
+    """正文文本片段。"""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class RenderStepSegment(BaseModel):
+    """step 入口片段。"""
+
+    type: Literal["step"] = "step"
+    step_group_id: str
+
+
+ChatRenderSegment = RenderTextSegment | RenderStepSegment
+
+
+class ChatMetaInfo(BaseModel):
+    """聊天附加元信息集合。"""
 
     tool_traces: list[ToolTrace] = Field(default_factory=list)
+    step_groups: list[StepGroup] = Field(default_factory=list)
+    render_segments: list[ChatRenderSegment] = Field(default_factory=list)
+    reasoning_text: str | None = None
+    reasoning_state: Literal["streaming", "completed"] | None = None
     mcp_connected_servers: list[str] = Field(default_factory=list)
     mcp_errors: list[str] = Field(default_factory=list)
+
+
+class AssistantVersion(BaseModel):
+    """助手回复的单个持久化版本。"""
+
+    id: int
+    version_index: Literal[1, 2, 3]
+    kind: Literal["original", "regenerated"]
+    text: str
+    meta: ChatMetaInfo | None = None
+    feedback: Literal["up", "down"] | None = None
+    created_at: str
 
 
 class ChatInvokeResponse(BaseModel):
     """最终聊天结果（供服务层内部组装与持久化）。"""
 
     assistant_message: str
-    debug: ChatDebugInfo = Field(default_factory=ChatDebugInfo)
-
-
-class StreamStartPayload(BaseModel):
-    """流式开始事件负载。"""
-
-    thread_id: str
-    started_at: str
-
-
-class StreamTokenPayload(BaseModel):
-    """流式 token 事件负载（LangChain 原生 chunk）。"""
-
-    chunk: "StreamChunkPayload"
-    meta: "StreamChunkMetaPayload"
-
-
-class StreamChunkPayload(BaseModel):
-    """LangChain `AIMessageChunk` 的可序列化字段快照。"""
-
-    id: str | None = None
-    type: str | None = None
-    content: Any = None
-    name: str | None = None
-    chunk_position: Any = None
-    tool_call_chunks: list[Any] = Field(default_factory=list)
-    tool_calls: list[Any] = Field(default_factory=list)
-    invalid_tool_calls: list[Any] = Field(default_factory=list)
-    usage_metadata: Any = None
-    response_metadata: dict[str, Any] = Field(default_factory=dict)
-    additional_kwargs: dict[str, Any] = Field(default_factory=dict)
-
-
-class StreamChunkMetaPayload(BaseModel):
-    """流式 chunk 的元信息。"""
-
-    node: str | None = None
-    sequence: int = Field(ge=1)
-    emitted_at: str
-
-
-class StreamToolPayload(BaseModel):
-    """流式工具事件负载。"""
-
-    tool_name: str
-    payload: Any = None
+    meta: ChatMetaInfo = Field(default_factory=ChatMetaInfo)
 
 
 class StreamErrorPayload(BaseModel):
@@ -104,7 +114,11 @@ class PersistedChatMessage(BaseModel):
     id: int
     role: Literal["user", "assistant"]
     text: str
-    debug: ChatDebugInfo | None = None
+    meta: ChatMetaInfo | None = None
+    reply_to_message_id: int | None = None
+    current_version_id: int | None = None
+    versions: list[AssistantVersion] = Field(default_factory=list)
+    can_regenerate: bool = False
     created_at: str
 
 
@@ -125,10 +139,52 @@ class SessionDetail(BaseModel):
     title: str
     created_at: str
     updated_at: str
+    model_profile_key: str
     messages: list[PersistedChatMessage] = Field(default_factory=list)
+
+
+class ChatModelProfile(BaseModel):
+    """前端可见的聊天模型档位。"""
+
+    key: str
+    label: str
+    kind: ChatModelProfileKind
+    is_default: bool = False
+
+
+class ListChatModelProfilesResponse(BaseModel):
+    """聊天模型档位列表。"""
+
+    default_profile_key: str
+    profiles: list[ChatModelProfile] = Field(default_factory=list)
 
 
 class RenameSessionRequest(BaseModel):
     """会话重命名请求。"""
 
     title: str = Field(min_length=1, max_length=100)
+
+
+class UpdateSessionModelProfileRequest(BaseModel):
+    """更新线程当前模型档位。"""
+
+    model_profile_key: str = Field(min_length=1, max_length=64)
+
+
+class SessionModelProfileState(BaseModel):
+    """线程当前模型档位状态。"""
+
+    thread_id: str
+    model_profile_key: str
+
+
+class SwitchAssistantVersionRequest(BaseModel):
+    """切换 assistant 当前展示版本。"""
+
+    version_id: int = Field(gt=0)
+
+
+class UpdateAssistantFeedbackRequest(BaseModel):
+    """更新 assistant version 点赞/点踩状态。"""
+
+    feedback: Literal["up", "down"] | None = None

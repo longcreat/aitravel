@@ -5,6 +5,14 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    host: "localhost",
+    port: 5173,
+    strictPort: true,
+  },
+  preview: {
+    host: "localhost",
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

@@ -10,7 +10,7 @@ import {
   setStoredAuthUser,
   setStoredAccessToken,
 } from "@/features/auth/model/auth.storage";
-import type { AuthPurpose, AuthUser } from "@/features/auth/model/auth.types";
+import type { AuthPurpose, AuthUser, PendingAuthMessagePayload } from "@/features/auth/model/auth.types";
 import { HttpError } from "@/shared/lib/http";
 
 interface AuthGateState {
@@ -22,7 +22,7 @@ interface AuthGateState {
 interface OpenAuthModalOptions {
   redirectTo?: string;
   initialMode?: AuthPurpose;
-  pendingMessage?: string;
+  pendingMessage?: PendingAuthMessagePayload;
 }
 
 interface AuthContextValue {

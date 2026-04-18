@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -21,7 +22,6 @@ class AuthSQLiteStore:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
@@ -29,39 +29,20 @@ class AuthSQLiteStore:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
-    def _initialize(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                  id TEXT PRIMARY KEY,
-                  email TEXT NOT NULL UNIQUE,
-                  nickname TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS email_login_codes (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  email TEXT NOT NULL,
-                  purpose TEXT NOT NULL CHECK(purpose IN ('login', 'register')),
-                  code_hash TEXT NOT NULL,
-                  expires_at TEXT NOT NULL,
-                  consumed_at TEXT,
-                  created_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_users_email
-                  ON users(email);
-
-                CREATE INDEX IF NOT EXISTS idx_email_login_codes_lookup
-                  ON email_login_codes(email, purpose, created_at DESC);
-                """
-            )
+    @contextmanager
+    def _connection(self):
+        conn = self._connect()
+        try:
+            yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def get_user_by_email(self, email: str) -> AuthUser | None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT id, email, nickname, created_at, updated_at
@@ -81,7 +62,7 @@ class AuthSQLiteStore:
         )
 
     def get_user_by_id(self, user_id: str) -> AuthUser | None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT id, email, nickname, created_at, updated_at
@@ -104,7 +85,7 @@ class AuthSQLiteStore:
         now = _utc_now_iso()
         nickname = email.split("@", 1)[0].strip() or "旅行用户"
         user_id = str(uuid4())
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO users (id, email, nickname, created_at, updated_at)
@@ -112,12 +93,11 @@ class AuthSQLiteStore:
                 """,
                 (user_id, email, nickname, now, now),
             )
-            conn.commit()
         return AuthUser(id=user_id, email=email, nickname=nickname, created_at=now, updated_at=now)
 
     def save_email_code(self, *, email: str, purpose: AuthPurpose, code_hash: str, expires_at: str) -> None:
         now = _utc_now_iso()
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE email_login_codes
@@ -133,10 +113,9 @@ class AuthSQLiteStore:
                 """,
                 (email, purpose, code_hash, expires_at, now),
             )
-            conn.commit()
 
     def get_latest_email_code(self, *, email: str, purpose: AuthPurpose) -> dict[str, str | int | None] | None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT id, email, purpose, code_hash, expires_at, consumed_at, created_at
@@ -160,7 +139,7 @@ class AuthSQLiteStore:
         }
 
     def consume_email_code(self, code_id: int) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE email_login_codes
@@ -169,4 +148,3 @@ class AuthSQLiteStore:
                 """,
                 (_utc_now_iso(), code_id),
             )
-            conn.commit()

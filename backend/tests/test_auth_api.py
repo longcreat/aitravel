@@ -19,6 +19,43 @@ class _NoopAgentService:
         return {"ready": False, "mcp_connected_servers": [], "mcp_errors": [], "local_tools": [], "mcp_tools": []}
 
 
+def test_auth_send_code_cors_preflight_allows_only_localhost(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    monkeypatch.setenv("CHAT_SQLITE_PATH", str(db_path))
+    monkeypatch.setenv("JWT_SECRET", "test-secret-for-auth-api-0123456789")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:5173")
+
+    deps.get_auth_service.cache_clear()
+    deps.get_agent_service.cache_clear()
+    monkeypatch.setattr("app.main.get_agent_service", lambda: _NoopAgentService())
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        localhost_preflight = client.options(
+            "/api/auth/send-code",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert localhost_preflight.status_code == 200
+
+        ipv4_preflight = client.options(
+            "/api/auth/send-code",
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert ipv4_preflight.status_code == 400
+
+    deps.get_auth_service.cache_clear()
+    deps.get_agent_service.cache_clear()
+
+
 def test_auth_send_code_verify_and_me(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "chat.db"
     monkeypatch.setenv("CHAT_SQLITE_PATH", str(db_path))

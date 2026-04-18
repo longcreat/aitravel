@@ -1,4 +1,15 @@
-import type { ChatInvokeRequest, ChatStreamEvent, SessionDetail, SessionSummary } from "@/features/chat/model/chat.types";
+import type {
+  ChatInvokeRequest,
+  ChatStreamEvent,
+  ListChatModelProfilesResponse,
+  PersistedChatMessage,
+  SessionDetail,
+  SessionModelProfileState,
+  SessionSummary,
+  SwitchAssistantVersionRequest,
+  UpdateSessionModelProfileRequest,
+  UpdateAssistantFeedbackRequest,
+} from "@/features/chat/model/chat.types";
 import { getStoredAccessToken } from "@/features/auth/model/auth.storage";
 import { env } from "@/shared/config/env";
 import { http } from "@/shared/lib/http";
@@ -61,8 +72,16 @@ function toStreamEvent(eventName: string, rawData: string): ChatStreamEvent | nu
 }
 
 export async function streamChat(payload: ChatInvokeRequest, options: StreamChatOptions): Promise<void> {
+  return streamSse("/api/chat/stream", payload, options);
+}
+
+export async function listChatModelProfiles(): Promise<ListChatModelProfilesResponse> {
+  return http.get<ListChatModelProfilesResponse>("/api/chat/model-profiles");
+}
+
+async function streamSse(path: string, payload: unknown, options: StreamChatOptions): Promise<void> {
   const accessToken = getStoredAccessToken();
-  const response = await fetch(`${env.apiBaseUrl}/api/chat/stream`, {
+  const response = await fetch(`${env.apiBaseUrl}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -127,6 +146,14 @@ export async function streamChat(payload: ChatInvokeRequest, options: StreamChat
   }
 }
 
+export async function regenerateAssistantMessage(
+  threadId: string,
+  messageId: number,
+  options: StreamChatOptions,
+): Promise<void> {
+  return streamSse(`/api/sessions/${encodeURIComponent(threadId)}/messages/${messageId}/regenerate/stream`, undefined, options);
+}
+
 export async function listSessions(): Promise<SessionSummary[]> {
   return http.get<SessionSummary[]>("/api/sessions");
 }
@@ -141,4 +168,37 @@ export async function renameSession(threadId: string, title: string): Promise<Se
 
 export async function deleteSession(threadId: string): Promise<void> {
   return http.delete<void>(`/api/sessions/${encodeURIComponent(threadId)}`);
+}
+
+export async function updateSessionModelProfile(
+  threadId: string,
+  payload: UpdateSessionModelProfileRequest,
+): Promise<SessionModelProfileState> {
+  return http.patch<SessionModelProfileState>(
+    `/api/sessions/${encodeURIComponent(threadId)}/model-profile`,
+    payload,
+  );
+}
+
+export async function switchAssistantVersion(
+  threadId: string,
+  messageId: number,
+  payload: SwitchAssistantVersionRequest,
+): Promise<PersistedChatMessage> {
+  return http.patch<PersistedChatMessage>(
+    `/api/sessions/${encodeURIComponent(threadId)}/messages/${messageId}/current-version`,
+    payload,
+  );
+}
+
+export async function updateAssistantFeedback(
+  threadId: string,
+  messageId: number,
+  versionId: number,
+  payload: UpdateAssistantFeedbackRequest,
+): Promise<PersistedChatMessage> {
+  return http.patch<PersistedChatMessage>(
+    `/api/sessions/${encodeURIComponent(threadId)}/messages/${messageId}/versions/${versionId}/feedback`,
+    payload,
+  );
 }

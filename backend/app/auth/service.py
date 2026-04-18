@@ -47,10 +47,17 @@ class AuthService:
 
     def __init__(self, sqlite_db_path: Path) -> None:
         self._store = AuthSQLiteStore(sqlite_db_path)
-        self._jwt_secret = os.getenv("JWT_SECRET", "dev-jwt-secret")
+        self._jwt_secret = self._load_jwt_secret()
         self._jwt_expire_days = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
         self._code_expire_minutes = int(os.getenv("AUTH_CODE_EXPIRE_MINUTES", "10"))
         self._smtp_settings = self._load_smtp_settings()
+
+    def _load_jwt_secret(self) -> str:
+        """读取并校验 JWT 密钥。"""
+        secret = os.getenv("JWT_SECRET", "").strip()
+        if not secret:
+            raise RuntimeError("JWT_SECRET 未配置，认证服务无法启动")
+        return secret
 
     def _load_smtp_settings(self) -> SMTPSettings | None:
         host = os.getenv("SMTP_HOST", "").strip()
@@ -102,6 +109,72 @@ class AuthService:
             algorithm="HS256",
         )
 
+    def _build_email_subject(self, code: str) -> str:
+        """构建验证码邮件主题。"""
+        return f"你的 WANDER AI 代码为 {code}"
+
+    def _build_email_text_body(self, *, email: str, code: str, purpose: AuthPurpose) -> str:
+        """构建纯文本邮件正文。"""
+        action_text = "登录" if purpose == "login" else "注册"
+        return (
+            f"WANDER AI 验证码\n\n"
+            f"请输入以下验证码以继续{action_text}：\n\n"
+            f"{code}\n\n"
+            f"该验证码将在 {self._code_expire_minutes} 分钟后失效。\n"
+            f"如果不是你本人在尝试{action_text} WANDER AI，请忽略这封邮件。\n\n"
+            f"发送至：{email}\n\n"
+            f"此致\n"
+            f"WANDER AI 团队\n"
+        )
+
+    def _build_email_html_body(self, *, email: str, code: str, purpose: AuthPurpose) -> str:
+        """构建 HTML 邮件正文。"""
+        action_text = "登录" if purpose == "login" else "注册"
+        return f"""\
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WANDER AI 验证码</title>
+  </head>
+  <body style="margin:0;background:#f6f4ee;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#2c2b28;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:24px;overflow:hidden;border:1px solid rgba(44,43,40,0.06);">
+      <tr>
+        <td style="padding:48px 40px 40px;">
+          <div style="font-size:36px;line-height:1.1;font-weight:700;letter-spacing:-0.04em;color:#2c2b28;">WANDER AI</div>
+          <div style="margin-top:32px;font-size:18px;line-height:1.8;color:#2c2b28;">
+            输入此临时验证码以继续{action_text}：
+          </div>
+          <div style="margin-top:20px;padding:22px 28px;border-radius:20px;background:#f4f2ec;font-size:40px;line-height:1.1;letter-spacing:0.18em;font-weight:600;color:#2c2b28;">
+            {code}
+          </div>
+          <div style="margin-top:28px;font-size:16px;line-height:1.9;color:#5f696a;">
+            该验证码将在 {self._code_expire_minutes} 分钟后失效。<br />
+            如果不是你本人在尝试{action_text} WANDER AI，请忽略这封邮件。
+          </div>
+          <div style="margin-top:28px;font-size:14px;line-height:1.8;color:#7a8c8f;">
+            发送至：{email}
+          </div>
+          <div style="margin-top:36px;font-size:16px;line-height:1.9;color:#2c2b28;">
+            谨致问候<br />
+            WANDER AI 团队
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0 40px 36px;">
+          <div style="height:1px;background:rgba(44,43,40,0.08);"></div>
+          <div style="padding-top:20px;font-size:14px;line-height:1.8;color:#8b938f;">
+            这是一封系统邮件，请勿直接回复。
+          </div>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
     def _send_email(self, *, email: str, code: str, purpose: AuthPurpose) -> None:
         if self._smtp_settings is None:
             raise HTTPException(
@@ -109,15 +182,18 @@ class AuthService:
                 detail="SMTP 未配置，暂时无法发送验证码",
             )
 
-        action_text = "登录" if purpose == "login" else "注册"
         message = EmailMessage()
         message["From"] = self._smtp_settings.from_email
         message["To"] = email
-        message["Subject"] = f"AI Travel Agent {action_text}验证码"
+        message["Subject"] = self._build_email_subject(code)
         message.set_content(
-            f"你的 {action_text} 验证码是：{code}\n"
-            f"验证码 {self._code_expire_minutes} 分钟内有效，请勿泄露给他人。\n",
+            self._build_email_text_body(email=email, code=code, purpose=purpose),
             subtype="plain",
+            charset="utf-8",
+        )
+        message.add_alternative(
+            self._build_email_html_body(email=email, code=code, purpose=purpose),
+            subtype="html",
             charset="utf-8",
         )
 

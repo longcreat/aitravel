@@ -42,6 +42,22 @@ export class AMapLocationError extends Error {
 
 let amapPromise: Promise<AMapNamespace> | null = null;
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorFactory: () => Error): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(errorFactory()), timeoutMs);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 function normalizeText(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -120,7 +136,7 @@ async function loadAMap(): Promise<AMapNamespace> {
   }
 
   try {
-    return await amapPromise;
+    return await withTimeout(amapPromise, 10000, () => new AMapLocationError("sdk-load-failed", "高德定位服务加载超时"));
   } catch (_error) {
     amapPromise = null;
     throw new AMapLocationError("sdk-load-failed", "高德定位服务加载失败");
@@ -163,24 +179,28 @@ export function getLocationFallbackMessage(error: unknown): string {
 export async function getCurrentLocationName(): Promise<string | null> {
   const AMap = await loadAMap();
 
-  return new Promise<string | null>((resolve, reject) => {
-    const geolocation = new AMap.Geolocation({
-      enableHighAccuracy: true,
-      timeout: 10000,
-      maximumAge: 5 * 60 * 1000,
-      convert: true,
-      needAddress: true,
-      showButton: false,
-      extensions: "base",
-    });
+  return withTimeout(
+    new Promise<string | null>((resolve, reject) => {
+      const geolocation = new AMap.Geolocation({
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 5 * 60 * 1000,
+        convert: true,
+        needAddress: true,
+        showButton: false,
+        extensions: "base",
+      });
 
-    geolocation.getCurrentPosition((status, result) => {
-      if (status !== "complete") {
-        reject(toLocationError(result));
-        return;
-      }
+      geolocation.getCurrentPosition((status, result) => {
+        if (status !== "complete") {
+          reject(toLocationError(result));
+          return;
+        }
 
-      resolve(buildDisplayName(result));
-    });
-  });
+        resolve(buildDisplayName(result));
+      });
+    }),
+    12000,
+    () => new AMapLocationError("timeout", "定位请求超时"),
+  );
 }

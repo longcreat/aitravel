@@ -1,4 +1,5 @@
 import * as React from "react";
+import { AppSurfaceOverlayRootContext } from "@/shared/layouts/app-surface-overlay";
 import { cn } from "@/shared/lib/cn";
 
 export interface MobileShellProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -42,31 +43,36 @@ function BatteryIcon() {
  * 去除了重复的 `.mobile-shell` 类，直接在此管理样式规则
  */
 export function MobileShell({ children, className, ...props }: MobileShellProps) {
+  const [overlayRoot, setOverlayRoot] = React.useState<HTMLDivElement | null>(null);
+
   return (
     <div className="flex min-h-dvh w-full items-center justify-center bg-gray-100 sm:py-4">
-      <main
-        className={cn(
-          "relative flex h-dvh w-full max-w-[430px] flex-col overflow-hidden bg-shell sm:h-[844px] sm:rounded-[40px] sm:border-[8px] sm:border-[#d9dde3]",
-          className
-        )}
-        {...props}
-      >
-        <div className="travel-noise pointer-events-none absolute inset-0 z-0 opacity-40 mix-blend-overlay" />
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-20 hidden sm:block">
-          <div className="relative flex h-[34px] items-center justify-between px-6 pt-2 text-[13px] font-semibold text-[#2c2b28]">
-            <span>9:41</span>
-            <div className="flex items-center gap-1.5">
-              <StatusBarIcon />
-              <WifiIcon />
-              <BatteryIcon />
+      <AppSurfaceOverlayRootContext.Provider value={overlayRoot}>
+        <main
+          className={cn(
+            "relative flex h-dvh w-full max-w-[430px] flex-col overflow-hidden bg-shell sm:h-[844px] sm:rounded-[40px] sm:border-[8px] sm:border-[#d9dde3]",
+            className
+          )}
+          {...props}
+        >
+          <div className="travel-noise pointer-events-none absolute inset-0 z-0 opacity-40 mix-blend-overlay" />
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-20 hidden sm:block">
+            <div className="relative flex h-[34px] items-center justify-between px-6 pt-2 text-[13px] font-semibold text-[#2c2b28]">
+              <span>9:41</span>
+              <div className="flex items-center gap-1.5">
+                <StatusBarIcon />
+                <WifiIcon />
+                <BatteryIcon />
+              </div>
+              <div className="absolute left-1/2 top-2 h-[26px] w-[108px] -translate-x-1/2 rounded-full bg-[#16181d]" />
             </div>
-            <div className="absolute left-1/2 top-2 h-[26px] w-[108px] -translate-x-1/2 rounded-full bg-[#16181d]" />
           </div>
-        </div>
-        <div className="relative z-10 flex h-full w-full flex-col sm:pt-[34px]">
-          {children}
-        </div>
-      </main>
+          <div className="relative z-10 flex h-full w-full flex-col sm:pt-[34px]">
+            {children}
+          </div>
+          <div ref={setOverlayRoot} className="pointer-events-none absolute inset-0 z-40" />
+        </main>
+      </AppSurfaceOverlayRootContext.Provider>
     </div>
   );
 }

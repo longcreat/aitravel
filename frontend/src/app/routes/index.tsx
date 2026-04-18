@@ -23,6 +23,10 @@ export const router = createBrowserRouter([
         element: <ChatPage />,
       },
       {
+        path: "chat/:threadId",
+        element: <ChatPage />,
+      },
+      {
         element: <RequireAuthRoute />,
         children: [
           {

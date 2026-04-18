@@ -1,4 +1,4 @@
-import type { AuthUser } from "@/features/auth/model/auth.types";
+import type { AuthUser, PendingAuthMessagePayload } from "@/features/auth/model/auth.types";
 
 const ACCESS_TOKEN_KEY = "ai-travel-access-token";
 const AUTH_USER_KEY = "ai-travel-auth-user";
@@ -59,20 +59,28 @@ export function clearStoredAuthUser(): void {
   window.localStorage.removeItem(AUTH_USER_KEY);
 }
 
-export function setPendingAuthMessage(message: string): void {
+export function setPendingAuthMessage(payload: PendingAuthMessagePayload): void {
   if (typeof window === "undefined") {
     return;
   }
-  window.sessionStorage.setItem(PENDING_MESSAGE_KEY, message);
+  window.sessionStorage.setItem(PENDING_MESSAGE_KEY, JSON.stringify(payload));
 }
 
-export function consumePendingAuthMessage(): string | null {
+export function consumePendingAuthMessage(): PendingAuthMessagePayload | null {
   if (typeof window === "undefined") {
     return null;
   }
-  const message = window.sessionStorage.getItem(PENDING_MESSAGE_KEY);
-  if (message) {
+  const raw = window.sessionStorage.getItem(PENDING_MESSAGE_KEY);
+  if (raw) {
     window.sessionStorage.removeItem(PENDING_MESSAGE_KEY);
   }
-  return message;
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as PendingAuthMessagePayload;
+  } catch {
+    return null;
+  }
 }

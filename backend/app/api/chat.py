@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from app.agent.service import TravelAgentService
 from app.api.deps import get_agent_service, get_current_user
 from app.schemas.auth import AuthUser
-from app.schemas.chat import ChatInvokeRequest, StreamErrorPayload
+from app.schemas.chat import ChatInvokeRequest, ListChatModelProfilesResponse, StreamErrorPayload
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -25,6 +25,16 @@ def _encode_sse(event: str, data: dict) -> bytes:
     """将事件编码为 SSE 协议文本块。"""
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
+
+
+@router.get("/model-profiles", response_model=ListChatModelProfilesResponse)
+async def list_model_profiles(
+    service: TravelAgentService = Depends(get_agent_service),
+) -> ListChatModelProfilesResponse:
+    """返回前端可见的模型档位列表。"""
+    profiles = service.list_model_profiles()
+    default_profile = next((profile.key for profile in profiles if profile.is_default), profiles[0].key)
+    return ListChatModelProfilesResponse(default_profile_key=default_profile, profiles=profiles)
 
 
 @router.post("/stream")
@@ -41,6 +51,8 @@ async def stream_chat(
                 yield _encode_sse(event_name, event_payload)
         except asyncio.CancelledError:  # pragma: no cover - 由客户端中断触发
             return
+        except ValueError as exc:
+            yield _encode_sse("error", StreamErrorPayload(message=str(exc)).model_dump())
         except Exception as exc:  # pragma: no cover - defensive boundary
             yield _encode_sse(
                 "error",

@@ -61,14 +61,6 @@ export function AuthPage() {
     }
   }
 
-  async function handleContinue() {
-    await requestCode();
-  }
-
-  async function handleResendCode() {
-    await requestCode();
-  }
-
   async function handleVerify() {
     const normalizedEmail = email.trim();
     const normalizedCode = code.trim();
@@ -107,12 +99,6 @@ export function AuthPage() {
 
   function handleLeavePage() {
     setLeaveConfirmOpen(false);
-
-    if (step === "code") {
-      navigate(-1);
-      return;
-    }
-
     navigate(-1);
   }
 
@@ -166,7 +152,7 @@ export function AuthPage() {
                   type="button"
                   className="h-14 w-full rounded-full bg-primary text-[18px] font-semibold text-primary-foreground hover:bg-primary/92 disabled:bg-secondary disabled:text-muted-foreground"
                   disabled={!email.trim() || sending}
-                  onClick={() => void handleContinue()}
+                  onClick={() => void requestCode()}
                 >
                   {sending ? "发送中..." : "继续"}
                 </Button>
@@ -209,7 +195,7 @@ export function AuthPage() {
                   variant="outline"
                   className="h-14 w-full rounded-full border-border bg-white text-[18px] font-medium text-muted-foreground hover:bg-secondary/30"
                   disabled={sending}
-                  onClick={() => void handleResendCode()}
+                  onClick={() => void requestCode()}
                 >
                   {sending ? "发送中..." : "重新发送电子邮件"}
                 </Button>

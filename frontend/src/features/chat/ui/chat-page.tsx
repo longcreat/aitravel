@@ -1,6 +1,6 @@
-import { CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Route, Trash2, User } from "lucide-react";
+import { Brain, ChevronDown, CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Route, Trash2, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { useAuth } from "@/features/auth/model/auth.context";
 import type { SessionSummary } from "@/features/chat/model/chat.types";
@@ -9,6 +9,7 @@ import { getCurrentLocationName, getLocationFallbackMessage } from "@/features/l
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
 import { 
+  AppSurfaceSheet,
   Button, 
   DropdownMenu, 
   DropdownMenuContent, 
@@ -82,6 +83,10 @@ function buildQuickPrompt(kind: QuickPromptKind, locationName: string | null) {
   }
 }
 
+function getModelProfileDescription(kind: "standard" | "thinking") {
+  return kind === "thinking" ? "深度推理" : "快速响应";
+}
+
 function groupSessionsByUpdatedAt(sessions: SessionSummary[]): SessionGroup[] {
   const groups: SessionGroup[] = [
     { label: "今日", items: [] },
@@ -119,35 +124,52 @@ function groupSessionsByUpdatedAt(sessions: SessionSummary[]): SessionGroup[] {
 
 export function ChatPage() {
   const navigate = useNavigate();
+  const { threadId: routeThreadId } = useParams<{ threadId?: string }>();
   const { openAuthModal, ready: authReady, user } = useAuth();
   const {
     threadId,
     messages,
     sessions,
+    sessionsReady,
+    modelProfiles,
+    selectedModelProfileKey,
+    selectedModelProfile,
     loading,
     error,
     isAuthenticated,
+    canStartRequest,
     sendMessage,
     openSession,
     renameSessionTitle,
     removeSession,
     startNewSession,
     stopGenerating,
+    regenerateLatestAssistantMessage,
+    selectAssistantVersion,
+    setAssistantFeedback,
+    updateCurrentModelProfile,
     retryLastSubmittedMessage,
-  } = useChatAgent();
+  } = useChatAgent(routeThreadId);
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
   const [renameSessionObj, setRenameSessionObj] = useState<{ id: string; title: string } | null>(null);
   const [renameInput, setRenameInput] = useState("");
   const [currentLocationName, setCurrentLocationName] = useState<string | null>(null);
+  const [quickPromptLoadingKind, setQuickPromptLoadingKind] = useState<QuickPromptKind | null>(null);
+  const [modelProfileSheetOpen, setModelProfileSheetOpen] = useState(false);
   
   const listRef = useRef<HTMLDivElement | null>(null);
+  const pendingNewThreadIdRef = useRef<string | null>(null);
+  const openedRouteThreadIdRef = useRef<string | null>(null);
+  const routeThreadIdRef = useRef(routeThreadId);
+  routeThreadIdRef.current = routeThreadId;
   const groupedSessions = useMemo(() => groupSessionsByUpdatedAt(sessions), [sessions]);
   const profileInitial = useMemo(() => {
     const source = user?.nickname?.trim() || user?.email?.trim() || "我";
     return source.slice(0, 1).toUpperCase();
   }, [user?.email, user?.nickname]);
+  const selectedModelProfileLabel = selectedModelProfile?.label ?? "模型";
 
   useEffect(() => {
     const node = listRef.current;
@@ -157,9 +179,54 @@ export function ChatPage() {
     node.scrollTop = node.scrollHeight;
   }, [messages, loading]);
 
-  async function handleOpenSession(targetThreadId: string) {
-    await openSession(targetThreadId);
+  useEffect(() => {
+    if (!threadId || routeThreadIdRef.current) {
+      return;
+    }
+
+    navigate(`/chat/${threadId}`, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigate, threadId]);
+
+  useEffect(() => {
+    if (
+      pendingNewThreadIdRef.current &&
+      routeThreadId === pendingNewThreadIdRef.current &&
+      threadId === pendingNewThreadIdRef.current
+    ) {
+      pendingNewThreadIdRef.current = null;
+    }
+  }, [routeThreadId, threadId]);
+
+  useEffect(() => {
+    if (!authReady || !isAuthenticated || !sessionsReady || !routeThreadId) {
+      return;
+    }
+
+    if (pendingNewThreadIdRef.current && routeThreadId !== pendingNewThreadIdRef.current) {
+      return;
+    }
+
+    if (!sessions.some((session) => session.thread_id === routeThreadId)) {
+      return;
+    }
+
+    if (openedRouteThreadIdRef.current === routeThreadId) {
+      return;
+    }
+
+    openedRouteThreadIdRef.current = routeThreadId;
+    void openSession(routeThreadId);
+  }, [authReady, isAuthenticated, openSession, routeThreadId, sessions, sessionsReady]);
+
+  function handleOpenSession(targetThreadId: string) {
+    if (routeThreadId === targetThreadId) {
+      setHistoryOpen(false);
+      return;
+    }
+
     setHistoryOpen(false);
+    navigate(`/chat/${targetThreadId}`);
   }
 
   function handleRenameSession(targetThreadId: string, currentTitle: string) {
@@ -190,6 +257,30 @@ export function ChatPage() {
     setHistoryOpen(true);
   }
 
+  function handleStartNewSession(closeHistory = false) {
+    const nextThreadId = startNewSession();
+    pendingNewThreadIdRef.current = nextThreadId;
+    openedRouteThreadIdRef.current = null;
+    if (closeHistory) {
+      setHistoryOpen(false);
+    }
+    navigate(`/chat/${nextThreadId}`);
+  }
+
+  function handleSelectModelProfile(nextProfileKey: string) {
+    if (nextProfileKey === selectedModelProfileKey) {
+      return;
+    }
+    void updateCurrentModelProfile(nextProfileKey);
+  }
+
+  function handleChooseModelProfile(nextProfileKey: string) {
+    if (nextProfileKey !== selectedModelProfileKey) {
+      handleSelectModelProfile(nextProfileKey);
+    }
+    setModelProfileSheetOpen(false);
+  }
+
   async function resolveCurrentLocationName() {
     if (currentLocationName) {
       return currentLocationName;
@@ -210,9 +301,23 @@ export function ChatPage() {
   }
 
   async function handleQuickPromptClick(kind: QuickPromptKind) {
-    const locationName = await resolveCurrentLocationName();
-    const prompt = buildQuickPrompt(kind, locationName);
-    await sendMessage(prompt);
+    if (!canStartRequest) {
+      return;
+    }
+
+    if (!isAuthenticated) {
+      await sendMessage(buildQuickPrompt(kind, null));
+      return;
+    }
+
+    setQuickPromptLoadingKind(kind);
+    try {
+      const locationName = await resolveCurrentLocationName();
+      const prompt = buildQuickPrompt(kind, locationName);
+      await sendMessage(prompt);
+    } finally {
+      setQuickPromptLoadingKind(null);
+    }
   }
 
   function handleOpenProfile() {
@@ -250,7 +355,7 @@ export function ChatPage() {
                     variant="ghost"
                     aria-label="new-session"
                     className="h-9 rounded-full bg-[#eee7d6] px-4 text-sm font-medium text-[#2c2b28] shadow-sm hover:bg-[#e6ddc9] active:scale-95 transition-all flex items-center gap-1.5"
-                    onClick={startNewSession}
+                    onClick={() => handleStartNewSession(true)}
                   >
                     <Plus className="h-4 w-4 stroke-[2]" />
                     新建会话
@@ -337,10 +442,7 @@ export function ChatPage() {
                     variant="ghost"
                     aria-label="guest-new-session"
                     className="h-9 rounded-full bg-secondary px-4 text-sm font-medium text-ink shadow-sm hover:bg-secondary/90 active:scale-95 transition-all flex items-center gap-1.5"
-                    onClick={() => {
-                      startNewSession();
-                      setHistoryOpen(false);
-                    }}
+                    onClick={() => handleStartNewSession(true)}
                   >
                     <Plus className="h-4 w-4 stroke-[2]" />
                     新建会话
@@ -399,7 +501,7 @@ export function ChatPage() {
         </div>
       ) : null}
 
-      <header className="relative bg-paper/80 px-4 pb-3 pt-[calc(0.9rem+env(safe-area-inset-top))] backdrop-blur">
+      <header className="relative bg-paper/80 px-4 pb-4 pt-[calc(0.9rem+env(safe-area-inset-top))] backdrop-blur">
         <div className="relative flex items-center justify-between gap-3">
           <div className="flex min-w-[44px] items-center">
             <Button size="icon" variant="ghost" aria-label="open-history" onClick={handleOpenHistory}>
@@ -407,8 +509,20 @@ export function ChatPage() {
             </Button>
           </div>
 
-          <div className="pointer-events-none absolute inset-x-0 flex justify-center">
-            <span className="text-[20px] font-semibold tracking-[-0.02em] text-[#2c2b28]">WANDER AI</span>
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-center">
+            <div className="pointer-events-auto flex flex-col items-center gap-1">
+              <span className="text-[20px] font-semibold tracking-[-0.02em] text-[#2c2b28]">WANDER AI</span>
+              <button
+                type="button"
+                aria-label="model-profile-selector"
+                className="inline-flex items-center gap-1 rounded-full border border-black/[0.06] bg-white/90 px-3 py-1 text-[12px] font-medium text-[#6b6861] shadow-sm transition-colors hover:bg-white"
+                onClick={() => setModelProfileSheetOpen(true)}
+              >
+                <Brain className="h-3.5 w-3.5 text-mint" />
+                <span>{selectedModelProfileLabel}</span>
+                <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+              </button>
+            </div>
           </div>
 
           <div className="flex min-w-[76px] justify-end">
@@ -420,7 +534,7 @@ export function ChatPage() {
                 variant="ghost" 
                 aria-label="new-session" 
                 className="rounded-full bg-white/85 shadow-sm hover:bg-white"
-                onClick={startNewSession}
+                onClick={() => handleStartNewSession()}
               >
                 <Plus className="h-5 w-5 text-mint" />
               </Button>
@@ -455,7 +569,8 @@ export function ChatPage() {
                     key={item.label}
                     type="button"
                     aria-label={`quick-prompt-${item.label}`}
-                    className="flex items-center gap-2 rounded-full border border-border bg-white px-4 py-3 text-left text-[15px] font-medium text-[#6d6a64] shadow-sm transition-colors hover:bg-secondary/40"
+                    disabled={!canStartRequest || quickPromptLoadingKind === item.kind}
+                    className="flex items-center gap-2 rounded-full border border-border bg-white px-4 py-3 text-left text-[15px] font-medium text-[#6d6a64] shadow-sm transition-colors hover:bg-secondary/40 disabled:cursor-not-allowed disabled:opacity-70"
                     onClick={() => void handleQuickPromptClick(item.kind)}
                   >
                     <Icon className={`h-5 w-5 shrink-0 ${item.iconClassName}`} />
@@ -468,7 +583,13 @@ export function ChatPage() {
         ) : null}
 
         {messages.map((message) => (
-          <ChatMessage key={message.id} message={message} />
+          <ChatMessage
+            key={message.id}
+            message={message}
+            onRegenerate={regenerateLatestAssistantMessage}
+            onSwitchVersion={selectAssistantVersion}
+            onFeedback={setAssistantFeedback}
+          />
         ))}
 
         {error ? (
@@ -484,7 +605,47 @@ export function ChatPage() {
         ) : null}
       </section>
 
-      <ChatComposer loading={loading} onSend={sendMessage} onStop={stopGenerating} />
+      <ChatComposer loading={loading} ready={authReady} onSend={sendMessage} onStop={stopGenerating} />
+
+      <AppSurfaceSheet
+        open={modelProfileSheetOpen}
+        onClose={() => setModelProfileSheetOpen(false)}
+        title="选择模型"
+        description="根据问题复杂度切换响应模式。"
+        className="inset-x-auto bottom-4 left-1/2 w-[calc(100%-2.5rem)] max-w-[392px] -translate-x-1/2 rounded-[32px] border-none px-6 pb-6 pt-12 sm:bottom-6"
+        closeButtonClassName="right-5 top-5 h-10 w-10 p-0 leading-none opacity-100 [&>svg]:h-5 [&>svg]:w-5 [&>svg]:shrink-0"
+        closeLabel="model-profile-sheet-close"
+      >
+        <div className="space-y-3">
+          {modelProfiles.map((profile) => {
+            const isSelected = profile.key === selectedModelProfileKey;
+
+            return (
+              <button
+                key={profile.key}
+                type="button"
+                aria-label={`model-profile-option-${profile.key}`}
+                aria-pressed={isSelected}
+                className={`w-full rounded-[24px] border px-5 py-4 text-left transition-colors ${
+                  isSelected
+                    ? "border-[#eadfc9] bg-[#f6efe0] shadow-sm"
+                    : "border-border bg-white hover:bg-secondary/30"
+                }`}
+                onClick={() => handleChooseModelProfile(profile.key)}
+              >
+                <div className="flex min-w-0 flex-col">
+                  <span className={`text-[18px] font-semibold tracking-[-0.02em] ${isSelected ? "text-ink" : "text-[#3b3935]"}`}>
+                    {profile.label}
+                  </span>
+                  <span className={`mt-1 text-[14px] leading-6 ${isSelected ? "text-[#7a6d58]" : "text-muted-foreground"}`}>
+                    {getModelProfileDescription(profile.kind)}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </AppSurfaceSheet>
 
       <Dialog open={!!deleteSessionId} onOpenChange={(open) => !open && setDeleteSessionId(null)}>
         <DialogContent className="max-w-[320px]">

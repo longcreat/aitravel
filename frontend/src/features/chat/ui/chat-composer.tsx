@@ -1,15 +1,17 @@
 import { ArrowUp, Keyboard, Mic, Square } from "lucide-react";
 import { FormEvent, useState, useRef, useEffect } from "react";
 
+import type { SendIntentResult } from "@/features/chat/model/chat.types";
 import { Button } from "@/shared/ui";
 
 interface ChatComposerProps {
   loading: boolean;
-  onSend: (message: string) => Promise<void>;
+  ready: boolean;
+  onSend: (message: string) => Promise<SendIntentResult>;
   onStop: () => void;
 }
 
-export function ChatComposer({ loading, onSend, onStop }: ChatComposerProps) {
+export function ChatComposer({ loading, ready, onSend, onStop }: ChatComposerProps) {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<"text" | "voice">("text");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -24,12 +26,14 @@ export function ChatComposer({ loading, onSend, onStop }: ChatComposerProps) {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     const text = value.trim();
-    if (!text || loading) {
+    if (!text || loading || !ready) {
       return;
     }
 
-    setValue("");
-    await onSend(text);
+    const result = await onSend(text);
+    if (result.status === "accepted") {
+      setValue("");
+    }
   }
 
   return (
@@ -52,9 +56,12 @@ export function ChatComposer({ loading, onSend, onStop }: ChatComposerProps) {
                 if (e.key === "Enter" && e.shiftKey) {
                   e.preventDefault();
                   const text = value.trim();
-                  if (text && !loading) {
-                    setValue("");
-                    void onSend(text);
+                  if (text && !loading && ready) {
+                    void onSend(text).then((result) => {
+                      if (result.status === "accepted") {
+                        setValue("");
+                      }
+                    });
                   }
                 }
               }}
@@ -92,6 +99,7 @@ export function ChatComposer({ loading, onSend, onStop }: ChatComposerProps) {
                     type="submit"
                     size="icon"
                     aria-label="send-message"
+                    disabled={!ready}
                     className="h-9 w-9 bg-ink text-white hover:bg-ink/90 transition-all active:scale-95 rounded-full"
                   >
                     <ArrowUp className="h-5 w-5" />

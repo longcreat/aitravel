@@ -9,10 +9,23 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_agent_service, get_current_user
 from app.main import create_app
 from app.schemas.auth import AuthUser
-from app.schemas.chat import PersistedChatMessage, SessionDetail, SessionSummary
+from app.schemas.chat import (
+    AssistantVersion,
+    ChatMetaInfo,
+    ChatModelProfile,
+    PersistedChatMessage,
+    SessionDetail,
+    SessionModelProfileState,
+    SessionSummary,
+)
 
 
 class _FakeService:
+    def __init__(self) -> None:
+        self.feedback: str | None = None
+        self.current_version_id = 1
+        self.model_profile_key = "standard"
+
     async def startup(self) -> None:
         return None
 
@@ -133,6 +146,12 @@ class _FakeService:
             },
         }
 
+    def list_model_profiles(self) -> list[ChatModelProfile]:
+        return [
+            ChatModelProfile(key="standard", label="普通", kind="standard", is_default=True),
+            ChatModelProfile(key="thinking", label="思考", kind="thinking", is_default=False),
+        ]
+
     def list_sessions(self, _user_id: str) -> list[SessionSummary]:
         return [
             SessionSummary(
@@ -152,6 +171,7 @@ class _FakeService:
             title="帮我做一个3天杭州...",
             created_at="2026-04-05T00:00:00Z",
             updated_at="2026-04-05T00:00:00Z",
+            model_profile_key=self.model_profile_key,
             messages=[
                 PersistedChatMessage(
                     id=1,
@@ -162,7 +182,42 @@ class _FakeService:
                 PersistedChatMessage(
                     id=2,
                     role="assistant",
-                    text="这是一个测试回复",
+                    text="这是一个测试回复" if self.current_version_id == 1 else "这是重生成后的回复",
+                    meta=ChatMetaInfo(
+                        tool_traces=[],
+                        mcp_connected_servers=[],
+                        mcp_errors=[],
+                    ),
+                    current_version_id=self.current_version_id,
+                    versions=[
+                        AssistantVersion(
+                            id=1,
+                            version_index=1,
+                            kind="original",
+                            text="这是一个测试回复",
+                            meta=ChatMetaInfo(
+                                tool_traces=[],
+                                mcp_connected_servers=[],
+                                mcp_errors=[],
+                            ),
+                            feedback=None,
+                            created_at="2026-04-05T00:00:01Z",
+                        ),
+                        AssistantVersion(
+                            id=2,
+                            version_index=2,
+                            kind="regenerated",
+                            text="这是重生成后的回复",
+                            meta=ChatMetaInfo(
+                                tool_traces=[],
+                                mcp_connected_servers=[],
+                                mcp_errors=[],
+                            ),
+                            feedback=self.feedback,  # type: ignore[arg-type]
+                            created_at="2026-04-05T00:00:02Z",
+                        ),
+                    ],
+                    can_regenerate=True,
                     created_at="2026-04-05T00:00:01Z",
                 ),
             ],
@@ -181,6 +236,79 @@ class _FakeService:
 
     async def delete_session(self, _user_id: str, thread_id: str) -> bool:
         return thread_id == "t-1"
+
+    def update_session_model_profile(self, _user_id: str, thread_id: str, model_profile_key: str):
+        if thread_id != "t-1":
+            return None
+        if model_profile_key not in {"standard", "thinking"}:
+            raise ValueError("Invalid model profile key")
+        self.model_profile_key = model_profile_key
+        return SessionModelProfileState(thread_id=thread_id, model_profile_key=model_profile_key)
+
+    async def stream_regenerate(self, _user_id: str, thread_id: str, message_id: int):
+        assert thread_id == "t-1"
+        assert message_id == 2
+        yield "messages", {
+            "type": "messages",
+            "ns": [],
+            "data": [
+                {
+                    "type": "AIMessageChunk",
+                    "data": {
+                        "content": "新的",
+                        "additional_kwargs": {},
+                        "response_metadata": {},
+                        "type": "AIMessageChunk",
+                        "name": None,
+                        "id": "chunk-r1",
+                        "tool_calls": [],
+                        "invalid_tool_calls": [],
+                        "usage_metadata": None,
+                        "tool_call_chunks": [],
+                        "chunk_position": None,
+                    },
+                },
+                {"langgraph_node": "model"},
+            ],
+        }
+        yield "values", {
+            "type": "values",
+            "ns": [],
+            "data": {
+                "messages": [
+                    {
+                        "type": "ai",
+                        "data": {
+                            "content": "新的重生成回复",
+                            "additional_kwargs": {},
+                            "response_metadata": {},
+                            "type": "ai",
+                            "name": None,
+                            "id": None,
+                            "tool_calls": [],
+                            "invalid_tool_calls": [],
+                            "usage_metadata": None,
+                        },
+                    }
+                ],
+            },
+        }
+
+    def switch_assistant_version(self, _user_id: str, thread_id: str, message_id: int, version_id: int):
+        if thread_id != "t-1" or message_id != 2 or version_id not in (1, 2):
+            return None
+        self.current_version_id = version_id
+        detail = self.get_session_detail(_user_id, thread_id)
+        assert detail is not None
+        return detail.messages[1]
+
+    def update_assistant_feedback(self, _user_id: str, thread_id: str, message_id: int, version_id: int, feedback: str | None):
+        if thread_id != "t-1" or message_id != 2 or version_id not in (1, 2):
+            return None
+        self.feedback = feedback
+        detail = self.get_session_detail(_user_id, thread_id)
+        assert detail is not None
+        return detail.messages[1]
 
 
 def _parse_sse(body: str) -> list[tuple[str, dict]]:
@@ -203,9 +331,10 @@ def _parse_sse(body: str) -> list[tuple[str, dict]]:
 
 def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CHAT_SQLITE_PATH", str(tmp_path / "chat.db"))
-    monkeypatch.setattr("app.main.get_agent_service", lambda: _FakeService())
+    fake_service = _FakeService()
+    monkeypatch.setattr("app.main.get_agent_service", lambda: fake_service)
     app = create_app()
-    app.dependency_overrides[get_agent_service] = lambda: _FakeService()
+    app.dependency_overrides[get_agent_service] = lambda: fake_service
     app.dependency_overrides[get_current_user] = lambda: AuthUser(
         id="user-1",
         email="demo@example.com",
@@ -240,9 +369,16 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
         assert list_res.status_code == 200
         assert list_res.json()[0]["thread_id"] == "t-1"
 
+        profile_list_res = client.get("/api/chat/model-profiles")
+        assert profile_list_res.status_code == 200
+        assert profile_list_res.json()["default_profile_key"] == "standard"
+        assert len(profile_list_res.json()["profiles"]) == 2
+
         detail_res = client.get("/api/sessions/t-1")
         assert detail_res.status_code == 200
+        assert detail_res.json()["model_profile_key"] == "standard"
         assert detail_res.json()["messages"][0]["role"] == "user"
+        assert detail_res.json()["messages"][1]["versions"][0]["kind"] == "original"
 
         missing_detail = client.get("/api/sessions/not-exist")
         assert missing_detail.status_code == 404
@@ -251,8 +387,37 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
         assert rename_res.status_code == 200
         assert rename_res.json()["title"] == "杭州周末行"
 
+        profile_update_res = client.patch(
+            "/api/sessions/t-1/model-profile",
+            json={"model_profile_key": "thinking"},
+        )
+        assert profile_update_res.status_code == 200
+        assert profile_update_res.json()["model_profile_key"] == "thinking"
+
+        regenerate_res = client.post("/api/sessions/t-1/messages/2/regenerate/stream")
+        assert regenerate_res.status_code == 200
+        regenerate_events = _parse_sse(regenerate_res.text)
+        assert [event[0] for event in regenerate_events] == ["messages", "values"]
+
+        switch_version_res = client.patch("/api/sessions/t-1/messages/2/current-version", json={"version_id": 2})
+        assert switch_version_res.status_code == 200
+        assert switch_version_res.json()["current_version_id"] == 2
+
+        feedback_res = client.patch(
+            "/api/sessions/t-1/messages/2/versions/2/feedback",
+            json={"feedback": "up"},
+        )
+        assert feedback_res.status_code == 200
+        assert feedback_res.json()["versions"][1]["feedback"] == "up"
+
         missing_rename = client.patch("/api/sessions/not-exist", json={"title": "x"})
         assert missing_rename.status_code == 404
+
+        invalid_profile_update = client.patch(
+            "/api/sessions/t-1/model-profile",
+            json={"model_profile_key": "unknown"},
+        )
+        assert invalid_profile_update.status_code == 400
 
         delete_res = client.delete("/api/sessions/t-1")
         assert delete_res.status_code == 200
@@ -260,5 +425,39 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
 
         missing_delete = client.delete("/api/sessions/not-exist")
         assert missing_delete.status_code == 404
+
+    app.dependency_overrides.clear()
+
+
+def test_regenerate_stream_returns_business_error_when_limit_reached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CHAT_SQLITE_PATH", str(tmp_path / "chat.db"))
+
+    class _LimitFakeService(_FakeService):
+        async def stream_regenerate(self, _user_id: str, thread_id: str, message_id: int):
+            assert thread_id == "t-1"
+            assert message_id == 2
+            if False:
+                yield "messages", {}
+            raise ValueError("最多生成三次无法重新生成")
+
+    fake_service = _LimitFakeService()
+    monkeypatch.setattr("app.main.get_agent_service", lambda: fake_service)
+    app = create_app()
+    app.dependency_overrides[get_agent_service] = lambda: fake_service
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        id="user-1",
+        email="demo@example.com",
+        nickname="demo",
+        created_at="2026-04-05T00:00:00Z",
+        updated_at="2026-04-05T00:00:00Z",
+    )
+
+    with TestClient(app) as client:
+        regenerate_res = client.post("/api/sessions/t-1/messages/2/regenerate/stream")
+        assert regenerate_res.status_code == 200
+        regenerate_events = _parse_sse(regenerate_res.text)
+        assert regenerate_events == [("error", {"message": "最多生成三次无法重新生成"})]
 
     app.dependency_overrides.clear()

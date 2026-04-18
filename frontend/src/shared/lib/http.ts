@@ -30,11 +30,12 @@ async function request<T>(endpoint: string, options: HttpOptions = {}): Promise<
     url += `?${searchParams.toString()}`;
   }
 
+  const accessToken = getStoredAccessToken();
   const config: RequestInit = {
     ...customConfig,
     headers: {
       "Content-Type": "application/json",
-      ...(getStoredAccessToken() ? { Authorization: `Bearer ${getStoredAccessToken()}` } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...headers,
     },
   };
