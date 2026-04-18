@@ -5,22 +5,30 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.agent.service import TravelAgentService
-from app.api.deps import get_agent_service
+from app.api.deps import get_agent_service, get_current_user
+from app.schemas.auth import AuthUser
 from app.schemas.chat import RenameSessionRequest, SessionDetail, SessionSummary
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
 @router.get("", response_model=list[SessionSummary])
-async def list_sessions(service: TravelAgentService = Depends(get_agent_service)) -> list[SessionSummary]:
+async def list_sessions(
+    service: TravelAgentService = Depends(get_agent_service),
+    current_user: AuthUser = Depends(get_current_user),
+) -> list[SessionSummary]:
     """返回会话摘要列表（按最近活跃时间倒序）。"""
-    return service.list_sessions()
+    return service.list_sessions(current_user.id)
 
 
 @router.get("/{thread_id}", response_model=SessionDetail)
-async def get_session(thread_id: str, service: TravelAgentService = Depends(get_agent_service)) -> SessionDetail:
+async def get_session(
+    thread_id: str,
+    service: TravelAgentService = Depends(get_agent_service),
+    current_user: AuthUser = Depends(get_current_user),
+) -> SessionDetail:
     """返回指定会话详情。"""
-    detail = service.get_session_detail(thread_id)
+    detail = service.get_session_detail(current_user.id, thread_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return detail
@@ -31,18 +39,23 @@ async def rename_session(
     thread_id: str,
     payload: RenameSessionRequest,
     service: TravelAgentService = Depends(get_agent_service),
+    current_user: AuthUser = Depends(get_current_user),
 ) -> SessionSummary:
     """重命名会话。"""
-    summary = service.rename_session(thread_id, payload.title)
+    summary = service.rename_session(current_user.id, thread_id, payload.title)
     if summary is None:
         raise HTTPException(status_code=404, detail="Session not found or invalid title")
     return summary
 
 
 @router.delete("/{thread_id}")
-async def delete_session(thread_id: str, service: TravelAgentService = Depends(get_agent_service)) -> dict:
+async def delete_session(
+    thread_id: str,
+    service: TravelAgentService = Depends(get_agent_service),
+    current_user: AuthUser = Depends(get_current_user),
+) -> dict:
     """删除会话及其全部消息。"""
-    deleted = await service.delete_session(thread_id)
+    deleted = await service.delete_session(current_user.id, thread_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"deleted": True}

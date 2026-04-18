@@ -1,8 +1,11 @@
-import { Compass, History, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Trash2, X } from "lucide-react";
+import { CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Route, Trash2, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
+import { useAuth } from "@/features/auth/model/auth.context";
 import type { SessionSummary } from "@/features/chat/model/chat.types";
 import { useChatAgent } from "@/features/chat/hooks/use-chat-agent";
+import { getCurrentLocationName, getLocationFallbackMessage } from "@/features/location/lib/amap-location";
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
 import { 
@@ -17,12 +20,66 @@ import {
   DialogTitle,
   DialogDescription,
   DialogFooter,
-  Input
+  Input,
+  toast,
 } from "@/shared/ui";
-
 interface SessionGroup {
   label: "今日" | "7日" | "30日" | "更早";
   items: SessionSummary[];
+}
+
+type QuickPromptKind = "plan" | "weather" | "spots" | "route";
+
+const quickPromptItems = [
+  {
+    kind: "plan" as const,
+    icon: Compass,
+    label: "规划行程",
+    iconClassName: "text-mint",
+  },
+  {
+    kind: "weather" as const,
+    icon: CloudSun,
+    label: "查询天气",
+    iconClassName: "text-[#4db1d6]",
+  },
+  {
+    kind: "spots" as const,
+    icon: MapPinned,
+    label: "推荐景点",
+    iconClassName: "text-[#d1ae39]",
+  },
+  {
+    kind: "route" as const,
+    icon: Route,
+    label: "规划路线",
+    iconClassName: "text-[#6f72f6]",
+  },
+] as const;
+
+function formatCurrentLocationName(locationName: string | null) {
+  if (!locationName) {
+    return "我当前的位置";
+  }
+
+  return locationName;
+}
+
+function buildQuickPrompt(kind: QuickPromptKind, locationName: string | null) {
+  const currentLocation = formatCurrentLocationName(locationName);
+
+  switch (kind) {
+    case "plan":
+      return `请根据${currentLocation}，帮我规划一个适合周末的短途旅行方案。`;
+    case "weather":
+      return `请查询${currentLocation}今天天气。`;
+    case "spots":
+      return `请推荐几个适合${currentLocation}附近周末散心的景点。`;
+    case "route":
+      return `${currentLocation}，请推荐一个附近值得去的地方，并规划怎么走最方便。`;
+    default:
+      return `请根据${currentLocation}给我一些旅行建议。`;
+  }
 }
 
 function groupSessionsByUpdatedAt(sessions: SessionSummary[]): SessionGroup[] {
@@ -61,12 +118,15 @@ function groupSessionsByUpdatedAt(sessions: SessionSummary[]): SessionGroup[] {
 }
 
 export function ChatPage() {
+  const navigate = useNavigate();
+  const { openAuthModal, ready: authReady, user } = useAuth();
   const {
     threadId,
     messages,
     sessions,
     loading,
     error,
+    isAuthenticated,
     sendMessage,
     openSession,
     renameSessionTitle,
@@ -80,9 +140,14 @@ export function ChatPage() {
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
   const [renameSessionObj, setRenameSessionObj] = useState<{ id: string; title: string } | null>(null);
   const [renameInput, setRenameInput] = useState("");
+  const [currentLocationName, setCurrentLocationName] = useState<string | null>(null);
   
   const listRef = useRef<HTMLDivElement | null>(null);
   const groupedSessions = useMemo(() => groupSessionsByUpdatedAt(sessions), [sessions]);
+  const profileInitial = useMemo(() => {
+    const source = user?.nickname?.trim() || user?.email?.trim() || "我";
+    return source.slice(0, 1).toUpperCase();
+  }, [user?.email, user?.nickname]);
 
   useEffect(() => {
     const node = listRef.current;
@@ -121,88 +186,208 @@ export function ChatPage() {
     setDeleteSessionId(null);
   }
 
+  function handleOpenHistory() {
+    setHistoryOpen(true);
+  }
+
+  async function resolveCurrentLocationName() {
+    if (currentLocationName) {
+      return currentLocationName;
+    }
+
+    try {
+      const displayName = await getCurrentLocationName();
+      if (displayName) {
+        setCurrentLocationName(displayName);
+      }
+      return displayName;
+    } catch (locationError) {
+      toast({
+        description: getLocationFallbackMessage(locationError),
+      });
+      return null;
+    }
+  }
+
+  async function handleQuickPromptClick(kind: QuickPromptKind) {
+    const locationName = await resolveCurrentLocationName();
+    const prompt = buildQuickPrompt(kind, locationName);
+    await sendMessage(prompt);
+  }
+
+  function handleOpenProfile() {
+    setHistoryOpen(false);
+
+    if (!authReady) {
+      return;
+    }
+
+    if (!isAuthenticated) {
+      openAuthModal({
+        redirectTo: "/profile",
+        initialMode: "login",
+      });
+      return;
+    }
+
+    navigate("/profile");
+  }
+
   return (
     <div className="flex h-full w-full flex-col">
 
       {historyOpen ? (
-        <div className="absolute inset-0 z-30 flex bg-black/30">
-          <aside className="relative h-full w-[84%] max-w-[360px] rounded-r-[8px] bg-white px-4 pb-4 pt-[calc(0.9rem+env(safe-area-inset-top))] sm:pt-[3.15rem]">
-            <div className="mb-3 flex items-center justify-between">
-              <Button
-                variant="ghost"
-                aria-label="new-session"
-                className="h-9 rounded-full bg-[#eee7d6] px-4 text-sm font-medium text-[#2c2b28] shadow-sm hover:bg-[#e6ddc9] active:scale-95 transition-all flex items-center gap-1.5"
-                onClick={startNewSession}
-              >
-                <Plus className="h-4 w-4 stroke-[2]" />
-                新建会话
-              </Button>
-              <Button size="icon" variant="ghost" aria-label="close-history" onClick={() => setHistoryOpen(false)}>
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
+        <div className={`absolute inset-0 z-30 flex ${isAuthenticated ? "bg-black/30" : "bg-transparent"}`}>
+          <aside
+            className={`relative h-full w-[84%] max-w-[360px] bg-white px-4 pb-4 pt-[calc(0.9rem+env(safe-area-inset-top))] sm:pt-[3.15rem] ${
+              isAuthenticated ? "rounded-r-[8px]" : "border-r border-black/[0.04]"
+            }`}
+          >
+            {isAuthenticated ? (
+              <>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <Button
+                    variant="ghost"
+                    aria-label="new-session"
+                    className="h-9 rounded-full bg-[#eee7d6] px-4 text-sm font-medium text-[#2c2b28] shadow-sm hover:bg-[#e6ddc9] active:scale-95 transition-all flex items-center gap-1.5"
+                    onClick={startNewSession}
+                  >
+                    <Plus className="h-4 w-4 stroke-[2]" />
+                    新建会话
+                  </Button>
 
-            <div className="scrollbar-hidden h-[calc(100%-3rem)] overflow-y-auto pr-1">
-              {groupedSessions.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center text-[#a29f98] pb-20">
-                  <MessageSquare className="mb-4 h-12 w-12 opacity-20" />
-                  <p className="text-sm font-medium">暂无历史会话</p>
-                  <p className="mt-1.5 text-[13px] opacity-60">随时开启你的新旅行对话</p>
+                  <button
+                    type="button"
+                    aria-label="open-profile"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary text-ink shadow-sm transition-colors hover:bg-secondary/90"
+                    onClick={handleOpenProfile}
+                  >
+                    <span className="text-sm font-semibold leading-none">{profileInitial}</span>
+                  </button>
                 </div>
-              ) : (
-                groupedSessions.map((group) => (
-                <section key={group.label} className="mb-4">
-                  <p className="mb-2 text-xs font-semibold text-[#47686d]">{group.label}</p>
-                  <div className="space-y-2">
-                    {group.items.map((session) => (
-                      <div key={session.thread_id} className="group relative rounded-lg px-2 hover:bg-black/5 transition-colors -mx-2">
-                        <div className="flex min-h-[36px] items-center gap-2">
-                          <button
-                            type="button"
-                            className="flex min-w-0 flex-1 items-center py-0.5 text-left"
-                            onClick={() => void handleOpenSession(session.thread_id)}
-                          >
-                            <p className="truncate text-[15px] font-medium leading-none text-ink">
-                              {session.title}
-                              {session.thread_id === threadId ? " · 当前" : ""}
-                            </p>
-                          </button>
 
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
+                <div className="mb-4 h-px bg-border" />
+
+                <div className="scrollbar-hidden h-[calc(100%-4rem)] overflow-y-auto pr-1">
+                  {groupedSessions.length === 0 ? (
+                    <div className="flex h-full flex-col items-center justify-center text-[#a29f98] pb-20">
+                      <MessageSquare className="mb-4 h-12 w-12 opacity-20" />
+                      <p className="text-sm font-medium">暂无历史会话</p>
+                      <p className="mt-1.5 text-[13px] opacity-60">随时开启你的新旅行对话</p>
+                    </div>
+                  ) : (
+                    groupedSessions.map((group) => (
+                    <section key={group.label} className="mb-4">
+                      <p className="mb-2 text-xs font-semibold text-[#47686d]">{group.label}</p>
+                      <div className="space-y-2">
+                        {group.items.map((session) => (
+                          <div key={session.thread_id} className="group relative rounded-lg px-2 hover:bg-black/5 transition-colors -mx-2">
+                            <div className="flex min-h-[36px] items-center gap-2">
                               <button
                                 type="button"
-                                className="shrink-0 rounded-md p-0.5 text-[#5f7a7e] outline-none hover:bg-black/5 data-[state=open]:bg-black/5"
-                                aria-label={`session-menu-${session.thread_id}`}
+                                className="flex min-w-0 flex-1 items-center py-0.5 text-left"
+                                onClick={() => void handleOpenSession(session.thread_id)}
                               >
-                                <MoreHorizontal className="h-4 w-4" />
+                                <p className="truncate text-[15px] font-medium leading-none text-ink">
+                                  {session.title}
+                                  {session.thread_id === threadId ? " · 当前" : ""}
+                                </p>
                               </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" className="w-[128px] rounded-xl p-1 shadow-lg">
-                              <DropdownMenuItem
-                                className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs text-ink focus:bg-[#f4f7f7]"
-                                onClick={() => void handleRenameSession(session.thread_id, session.title)}
-                              >
-                                <Pencil className="h-3.5 w-3.5" />
-                                重命名
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs text-[#8d3b2f] focus:bg-[#fff0ee] focus:text-[#8d3b2f]"
-                                onClick={() => void handleDeleteSession(session.thread_id)}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                                删除
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
+
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <button
+                                    type="button"
+                                    className="shrink-0 rounded-md p-0.5 text-[#5f7a7e] outline-none hover:bg-black/5 data-[state=open]:bg-black/5"
+                                    aria-label={`session-menu-${session.thread_id}`}
+                                  >
+                                    <MoreHorizontal className="h-4 w-4" />
+                                  </button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="w-[128px] rounded-xl p-1 shadow-lg">
+                                  <DropdownMenuItem
+                                    className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs text-ink focus:bg-[#f4f7f7]"
+                                    onClick={() => void handleRenameSession(session.thread_id, session.title)}
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                    重命名
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs text-[#8d3b2f] focus:bg-[#fff0ee] focus:text-[#8d3b2f]"
+                                    onClick={() => void handleDeleteSession(session.thread_id)}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                    删除
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    </section>
+                  ))
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="flex h-full flex-col">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <Button
+                    variant="ghost"
+                    aria-label="guest-new-session"
+                    className="h-9 rounded-full bg-secondary px-4 text-sm font-medium text-ink shadow-sm hover:bg-secondary/90 active:scale-95 transition-all flex items-center gap-1.5"
+                    onClick={() => {
+                      startNewSession();
+                      setHistoryOpen(false);
+                    }}
+                  >
+                    <Plus className="h-4 w-4 stroke-[2]" />
+                    新建会话
+                  </Button>
+
+                  <button
+                    type="button"
+                    aria-label="open-profile"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary text-mint shadow-sm transition-colors hover:bg-secondary/90"
+                    onClick={handleOpenProfile}
+                  >
+                    <User className="h-5 w-5" />
+                  </button>
+                </div>
+
+                <div className="mb-5 h-px bg-border" />
+
+                <div className="flex flex-1 flex-col items-center justify-center px-4 text-center">
+                  <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-secondary text-mint">
+                    <MessageSquare className="h-8 w-8" />
                   </div>
-                </section>
-              ))
-              )}
-            </div>
+                  <p className="text-[18px] font-semibold tracking-[-0.02em] text-ink">登录后查看历史会话</p>
+                  <p className="mt-3 max-w-[240px] text-sm leading-7 text-muted-foreground">
+                    你的对话记录、会话管理和跨设备继续使用，都需要先登录后才能保存。
+                  </p>
+                </div>
+
+                <div className="px-2 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+                  <p className="mb-5 text-[15px] leading-8 text-muted-foreground">
+                    登录后即可保存聊天历史。
+                  </p>
+                  <Button
+                    type="button"
+                    aria-label="login-or-register"
+                    className="h-14 w-full rounded-full bg-primary text-[16px] font-semibold text-primary-foreground hover:bg-primary/92"
+                    onClick={() =>
+                      openAuthModal({
+                        redirectTo: "/chat",
+                        initialMode: "login",
+                      })
+                    }
+                  >
+                    登录或注册
+                  </Button>
+                </div>
+              </div>
+            )}
           </aside>
 
           <button
@@ -215,17 +400,73 @@ export function ChatPage() {
       ) : null}
 
       <header className="relative bg-paper/80 px-4 pb-3 pt-[calc(0.9rem+env(safe-area-inset-top))] backdrop-blur">
-        <div className="flex items-center justify-between">
-          <Button size="icon" variant="ghost" aria-label="open-history" onClick={() => setHistoryOpen(true)}>
-            <History className="h-5 w-5 text-mint" />
-          </Button>
-          <div className="rounded-full bg-white/85 p-2 shadow-sm">
-            <Compass className="h-5 w-5 text-mint" />
+        <div className="relative flex items-center justify-between gap-3">
+          <div className="flex min-w-[44px] items-center">
+            <Button size="icon" variant="ghost" aria-label="open-history" onClick={handleOpenHistory}>
+              <List className="h-5 w-5 text-mint" />
+            </Button>
+          </div>
+
+          <div className="pointer-events-none absolute inset-x-0 flex justify-center">
+            <span className="text-[20px] font-semibold tracking-[-0.02em] text-[#2c2b28]">WANDER AI</span>
+          </div>
+
+          <div className="flex min-w-[76px] justify-end">
+            {!authReady ? (
+              <div className="h-10 w-[76px]" aria-hidden="true" />
+            ) : isAuthenticated ? (
+              <Button 
+                size="icon" 
+                variant="ghost" 
+                aria-label="new-session" 
+                className="rounded-full bg-white/85 shadow-sm hover:bg-white"
+                onClick={startNewSession}
+              >
+                <Plus className="h-5 w-5 text-mint" />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                aria-label="login"
+                className="h-10 rounded-full bg-primary px-5 text-sm font-semibold text-primary-foreground hover:bg-primary/92"
+                onClick={() =>
+                  openAuthModal({
+                    redirectTo: "/chat",
+                    initialMode: "login",
+                  })
+                }
+              >
+                登录
+              </Button>
+            )}
           </div>
         </div>
       </header>
 
       <section ref={listRef} className="scrollbar-hidden relative flex-1 space-y-4 overflow-y-auto py-4">
+        {messages.length === 0 ? (
+          <div className="flex min-h-full flex-col items-center justify-center px-6 pb-16 pt-6 text-center">
+            <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-ink">有什么可以帮忙的？</h2>
+            <div className="mt-6 grid w-full max-w-[320px] grid-cols-2 gap-3">
+              {quickPromptItems.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.label}
+                    type="button"
+                    aria-label={`quick-prompt-${item.label}`}
+                    className="flex items-center gap-2 rounded-full border border-border bg-white px-4 py-3 text-left text-[15px] font-medium text-[#6d6a64] shadow-sm transition-colors hover:bg-secondary/40"
+                    onClick={() => void handleQuickPromptClick(item.kind)}
+                  >
+                    <Icon className={`h-5 w-5 shrink-0 ${item.iconClassName}`} />
+                    <span className="truncate">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
         {messages.map((message) => (
           <ChatMessage key={message.id} message={message} />
         ))}

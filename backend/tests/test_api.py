@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_agent_service
+from app.api.deps import get_agent_service, get_current_user
 from app.main import create_app
+from app.schemas.auth import AuthUser
 from app.schemas.chat import PersistedChatMessage, SessionDetail, SessionSummary
 
 
@@ -25,7 +28,7 @@ class _FakeService:
             "mcp_tools": ["demo_search"],
         }
 
-    async def stream_invoke(self, _payload):
+    async def stream_invoke(self, _user_id, _payload):
         yield "messages", {
             "type": "messages",
             "ns": [],
@@ -130,7 +133,7 @@ class _FakeService:
             },
         }
 
-    def list_sessions(self) -> list[SessionSummary]:
+    def list_sessions(self, _user_id: str) -> list[SessionSummary]:
         return [
             SessionSummary(
                 thread_id="t-1",
@@ -141,7 +144,7 @@ class _FakeService:
             )
         ]
 
-    def get_session_detail(self, thread_id: str) -> SessionDetail | None:
+    def get_session_detail(self, _user_id: str, thread_id: str) -> SessionDetail | None:
         if thread_id != "t-1":
             return None
         return SessionDetail(
@@ -165,7 +168,7 @@ class _FakeService:
             ],
         )
 
-    def rename_session(self, thread_id: str, title: str) -> SessionSummary | None:
+    def rename_session(self, _user_id: str, thread_id: str, title: str) -> SessionSummary | None:
         if thread_id != "t-1":
             return None
         return SessionSummary(
@@ -176,7 +179,7 @@ class _FakeService:
             last_message_preview="这是一个测试回复",
         )
 
-    async def delete_session(self, thread_id: str) -> bool:
+    async def delete_session(self, _user_id: str, thread_id: str) -> bool:
         return thread_id == "t-1"
 
 
@@ -198,9 +201,18 @@ def _parse_sse(body: str) -> list[tuple[str, dict]]:
     return events
 
 
-def test_chat_stream_api_and_sessions_api() -> None:
+def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CHAT_SQLITE_PATH", str(tmp_path / "chat.db"))
+    monkeypatch.setattr("app.main.get_agent_service", lambda: _FakeService())
     app = create_app()
     app.dependency_overrides[get_agent_service] = lambda: _FakeService()
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        id="user-1",
+        email="demo@example.com",
+        nickname="demo",
+        created_at="2026-04-05T00:00:00Z",
+        updated_at="2026-04-05T00:00:00Z",
+    )
 
     with TestClient(app) as client:
         health = client.get("/api/health")
@@ -248,3 +260,5 @@ def test_chat_stream_api_and_sessions_api() -> None:
 
         missing_delete = client.delete("/api/sessions/not-exist")
         assert missing_delete.status_code == 404
+
+    app.dependency_overrides.clear()

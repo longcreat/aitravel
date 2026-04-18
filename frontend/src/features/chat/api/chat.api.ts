@@ -1,4 +1,5 @@
 import type { ChatInvokeRequest, ChatStreamEvent, SessionDetail, SessionSummary } from "@/features/chat/model/chat.types";
+import { getStoredAccessToken } from "@/features/auth/model/auth.storage";
 import { env } from "@/shared/config/env";
 import { http } from "@/shared/lib/http";
 
@@ -60,11 +61,13 @@ function toStreamEvent(eventName: string, rawData: string): ChatStreamEvent | nu
 }
 
 export async function streamChat(payload: ChatInvokeRequest, options: StreamChatOptions): Promise<void> {
+  const accessToken = getStoredAccessToken();
   const response = await fetch(`${env.apiBaseUrl}/api/chat/stream`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify(payload),
     signal: options.signal,

@@ -6,7 +6,12 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from app.agent.service import TravelAgentService
+from app.auth.service import AuthService
+from app.schemas.auth import AuthUser
 
 
 @lru_cache
@@ -20,3 +25,24 @@ def get_agent_service() -> TravelAgentService:
     config_path = backend_root / "config" / "mcp.servers.json"
     sqlite_path = Path(os.getenv("CHAT_SQLITE_PATH", str(backend_root / "data" / "chat.db")))
     return TravelAgentService(mcp_config_path=config_path, sqlite_db_path=sqlite_path)
+
+
+@lru_cache
+def get_auth_service() -> AuthService:
+    """返回全局单例 `AuthService`。"""
+    backend_root = Path(__file__).resolve().parents[2]
+    sqlite_path = Path(os.getenv("CHAT_SQLITE_PATH", str(backend_root / "data" / "chat.db")))
+    return AuthService(sqlite_db_path=sqlite_path)
+
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> AuthUser:
+    """解析 Bearer Token 并返回当前用户。"""
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+    return auth_service.get_current_user(credentials.credentials)

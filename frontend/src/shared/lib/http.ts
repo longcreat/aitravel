@@ -1,10 +1,11 @@
 import { env } from "@/shared/config/env";
+import { getStoredAccessToken } from "@/features/auth/model/auth.storage";
 
 interface HttpOptions extends RequestInit {
   params?: Record<string, string | number | boolean>;
 }
 
-class HttpError extends Error {
+export class HttpError extends Error {
   status: number;
   data?: unknown;
 
@@ -33,6 +34,7 @@ async function request<T>(endpoint: string, options: HttpOptions = {}): Promise<
     ...customConfig,
     headers: {
       "Content-Type": "application/json",
+      ...(getStoredAccessToken() ? { Authorization: `Bearer ${getStoredAccessToken()}` } : {}),
       ...headers,
     },
   };
@@ -44,7 +46,7 @@ async function request<T>(endpoint: string, options: HttpOptions = {}): Promise<
     let errorData;
     try {
       const data = await response.json();
-      errorMessage = data.message || errorMessage;
+      errorMessage = data.message || data.detail || errorMessage;
       errorData = data;
     } catch {
       const text = await response.text();

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useAuth } from "@/features/auth/model/auth.context";
+import { consumePendingAuthMessage } from "@/features/auth/model/auth.storage";
 import {
   deleteSession,
   getSession,
@@ -25,14 +27,6 @@ function createThreadId() {
 
 function createMessageId() {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function createGreetingMessage(): ChatMessageItem {
-  return {
-    id: createMessageId(),
-    role: "assistant",
-    text: "你好，我是你的 AI 旅行 Agent。告诉我目的地、时间或想了解的问题，我会结合工具给你建议。",
-  };
 }
 
 const fallbackDebugInfo: ChatDebugInfo = {
@@ -201,8 +195,9 @@ function buildFinalPayloadFromValues(
 }
 
 export function useChatAgent() {
+  const { isAuthenticated, openAuthModal, ready } = useAuth();
   const [threadId, setThreadId] = useState<string>(() => createThreadId());
-  const [messages, setMessages] = useState<ChatMessageItem[]>([createGreetingMessage()]);
+  const [messages, setMessages] = useState<ChatMessageItem[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -212,21 +207,28 @@ export function useChatAgent() {
   const canSend = useMemo(() => !loading, [loading]);
 
   const refreshSessions = useCallback(async () => {
+    if (!isAuthenticated) {
+      setSessions([]);
+      return;
+    }
     try {
       const next = await listSessions();
       setSessions(next);
     } catch {
       // 会话列表失败不阻断聊天主链路。
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
+    if (!ready) {
+      return;
+    }
     void refreshSessions();
-  }, [refreshSessions]);
+  }, [ready, refreshSessions]);
 
   const startNewSession = useCallback(() => {
     setThreadId(createThreadId());
-    setMessages([createGreetingMessage()]);
+    setMessages([]);
     setError(null);
   }, []);
 
@@ -244,7 +246,7 @@ export function useChatAgent() {
         debug: message.debug ?? undefined,
       }));
 
-      setMessages(restored.length ? restored : [createGreetingMessage()]);
+      setMessages(restored);
     } catch (openError) {
       const message = openError instanceof Error ? openError.message : "加载会话失败";
       setError(message);
@@ -276,6 +278,17 @@ export function useChatAgent() {
   async function sendMessage(text: string) {
     const normalized = text.trim();
     if (!normalized || !canSend) {
+      return;
+    }
+    if (!ready) {
+      return;
+    }
+    if (!isAuthenticated) {
+      openAuthModal({
+        redirectTo: "/chat",
+        initialMode: "login",
+        pendingMessage: normalized,
+      });
       return;
     }
 
@@ -432,12 +445,24 @@ export function useChatAgent() {
     await sendMessage(lastSubmittedMessage);
   }, [loading]);
 
+  useEffect(() => {
+    if (!ready || !isAuthenticated || loading) {
+      return;
+    }
+    const pendingMessage = consumePendingAuthMessage();
+    if (!pendingMessage) {
+      return;
+    }
+    void sendMessage(pendingMessage);
+  }, [isAuthenticated, loading, ready]);
+
   return {
     threadId,
     messages,
     sessions,
     loading,
     error,
+    isAuthenticated,
     canSend,
     sendMessage,
     openSession,

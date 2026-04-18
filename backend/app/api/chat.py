@@ -14,7 +14,8 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from app.agent.service import TravelAgentService
-from app.api.deps import get_agent_service
+from app.api.deps import get_agent_service, get_current_user
+from app.schemas.auth import AuthUser
 from app.schemas.chat import ChatInvokeRequest, StreamErrorPayload
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -30,12 +31,13 @@ def _encode_sse(event: str, data: dict) -> bytes:
 async def stream_chat(
     payload: ChatInvokeRequest,
     service: TravelAgentService = Depends(get_agent_service),
+    current_user: AuthUser = Depends(get_current_user),
 ) -> StreamingResponse:
     """以 SSE 方式返回 LangGraph 原生流事件。"""
 
     async def _stream() -> AsyncIterator[bytes]:
         try:
-            async for event_name, event_payload in service.stream_invoke(payload):
+            async for event_name, event_payload in service.stream_invoke(current_user.id, payload):
                 yield _encode_sse(event_name, event_payload)
         except asyncio.CancelledError:  # pragma: no cover - 由客户端中断触发
             return

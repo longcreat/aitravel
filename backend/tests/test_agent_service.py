@@ -7,6 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from app.agent.service import TravelAgentService, _messages_have_closed_tool_calls
+from app.auth.store import AuthSQLiteStore
 from app.schemas.chat import ChatInvokeRequest
 
 
@@ -164,11 +165,13 @@ async def test_travel_agent_service_stream_invoke(monkeypatch: pytest.MonkeyPatc
     cfg.write_text("{}", encoding="utf-8")
 
     sqlite_db = tmp_path / "chat.db"
+    user = AuthSQLiteStore(sqlite_db).create_user("demo@example.com")
     service = TravelAgentService(mcp_config_path=cfg, sqlite_db_path=sqlite_db)
     await service.startup()
 
     events: list[tuple[str, dict]] = []
     async for event_name, payload in service.stream_invoke(
+        user.id,
         ChatInvokeRequest(thread_id="thread-1", user_message="帮我规划日本行程", locale="zh-CN")
     ):
         events.append((event_name, payload))
@@ -181,7 +184,7 @@ async def test_travel_agent_service_stream_invoke(monkeypatch: pytest.MonkeyPatc
     assert events[-1][1]["type"] == "values"
     assert events[-1][1]["data"]["messages"][-1]["data"]["content"] == "推荐先去东京，再去大阪。"
 
-    detail = service.get_session_detail("thread-1")
+    detail = service.get_session_detail(user.id, "thread-1")
     assert detail is not None
     assert detail.title.startswith("帮我规划日本行程")
     assert len(detail.messages) == 2
@@ -213,11 +216,13 @@ async def test_travel_agent_service_stream_invoke_without_token_events(
     cfg.write_text("{}", encoding="utf-8")
 
     sqlite_db = tmp_path / "chat.db"
+    user = AuthSQLiteStore(sqlite_db).create_user("demo@example.com")
     service = TravelAgentService(mcp_config_path=cfg, sqlite_db_path=sqlite_db)
     await service.startup()
 
     events: list[tuple[str, dict]] = []
     async for event_name, payload in service.stream_invoke(
+        user.id,
         ChatInvokeRequest(thread_id="thread-2", user_message="直接给结果", locale="zh-CN")
     ):
         events.append((event_name, payload))
@@ -253,15 +258,18 @@ async def test_travel_agent_service_uses_latest_human_message_as_agent_input(
     cfg.write_text("{}", encoding="utf-8")
 
     sqlite_db = tmp_path / "chat.db"
+    user = AuthSQLiteStore(sqlite_db).create_user("demo@example.com")
     service = TravelAgentService(mcp_config_path=cfg, sqlite_db_path=sqlite_db)
     await service.startup()
 
     async for _event_name, _payload in service.stream_invoke(
+        user.id,
         ChatInvokeRequest(thread_id="thread-3", user_message="第一句", locale="zh-CN")
     ):
         pass
 
     async for _event_name, _payload in service.stream_invoke(
+        user.id,
         ChatInvokeRequest(thread_id="thread-3", user_message="第二句", locale="zh-CN")
     ):
         pass

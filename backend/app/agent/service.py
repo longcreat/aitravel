@@ -169,12 +169,11 @@ class TravelAgentService:
             "mcp_tools": [getattr(tool, "name", "unknown") for tool in self._runtime.mcp_bundle.tools],
         }
 
-    def list_sessions(self) -> list[SessionSummary]:
+    def list_sessions(self, user_id: str) -> list[SessionSummary]:
         """返回会话摘要列表。"""
-        # 直接复用业务存储层的查询结果。
-        return self._chat_store.list_sessions()
+        return self._chat_store.list_sessions(user_id)
 
-    def get_session_detail(self, thread_id: str) -> SessionDetail | None:
+    def get_session_detail(self, user_id: str, thread_id: str) -> SessionDetail | None:
         """返回会话详情。
 
         Args:
@@ -183,13 +182,13 @@ class TravelAgentService:
         Returns:
             SessionDetail | None: 找到则返回详情，否则返回 `None`。
         """
-        return self._chat_store.get_session_detail(thread_id)
+        return self._chat_store.get_session_detail(user_id, thread_id)
 
-    def rename_session(self, thread_id: str, title: str) -> SessionSummary | None:
+    def rename_session(self, user_id: str, thread_id: str, title: str) -> SessionSummary | None:
         """重命名会话。"""
-        return self._chat_store.rename_session(thread_id, title)
+        return self._chat_store.rename_session(user_id, thread_id, title)
 
-    async def delete_session(self, thread_id: str) -> bool:
+    async def delete_session(self, user_id: str, thread_id: str) -> bool:
         """删除会话。
 
         删除会话时需要同时清理两层数据：
@@ -197,13 +196,13 @@ class TravelAgentService:
         2. LangGraph checkpoint 表中的线程状态。
         """
         # 先删业务表；如果业务表里都不存在，就不必再操作 checkpoint。
-        deleted = self._chat_store.delete_session(thread_id)
+        deleted = self._chat_store.delete_session(user_id, thread_id)
         # 只有 runtime 已初始化时，才有 checkpointer 可供删除。
         if deleted and self._runtime is not None:
             await self._runtime.checkpointer.adelete_thread(thread_id)
         return deleted
 
-    async def stream_invoke(self, request: ChatInvokeRequest):
+    async def stream_invoke(self, user_id: str, request: ChatInvokeRequest):
         """执行流式聊天并产出 LangGraph 原生流事件。
 
         在流式前先写入用户消息；在流式结束后写入助手消息，确保会话可重启恢复。
@@ -217,9 +216,9 @@ class TravelAgentService:
         assert self._runtime is not None
 
         # 先把用户消息落业务表，确保即使后面流式失败，历史里也能看到这一轮提问。
-        self._chat_store.append_user_message(request.thread_id, request.user_message)
+        self._chat_store.append_user_message(user_id, request.thread_id, request.user_message)
         # 找出这条线程当前应该恢复到哪个稳定 checkpoint。
-        checkpoint_id = await self._get_effective_checkpoint_id(request.thread_id)
+        checkpoint_id = await self._get_effective_checkpoint_id(user_id, request.thread_id)
         # Agent 输入只保留“本轮新增的人类消息”，历史由 checkpoint 恢复。
         model_messages = [HumanMessage(content=request.user_message)]
         # `thread_id` 是 LangGraph 记忆恢复的主键；`checkpoint_id` 用于显式指定恢复起点。
@@ -280,7 +279,7 @@ class TravelAgentService:
                 yield part_type or "message", _serialize_stream_part(part)
         except BaseException:
             # 无论是前端主动中断、网络断开还是工具异常，都回滚到最近稳定 checkpoint。
-            await self.rollback_thread(request.thread_id)
+            await self.rollback_thread(user_id, request.thread_id)
             # 回滚完成后继续把异常抛出去，交由 API 层转成 SSE error。
             raise
 
@@ -294,14 +293,15 @@ class TravelAgentService:
 
         # 最终只把完整助手消息写入业务表，不存 token 级碎片。
         self._chat_store.append_assistant_message(
+            user_id,
             request.thread_id,
             final_response.assistant_message,
             debug=final_response.debug.model_dump(),
         )
         # 这一轮完整成功后，把当前线程最新合法状态标记为新的稳定点。
-        await self._mark_thread_stable(request.thread_id)
+        await self._mark_thread_stable(user_id, request.thread_id)
 
-    async def rollback_thread(self, thread_id: str) -> None:
+    async def rollback_thread(self, user_id: str, thread_id: str) -> None:
         """将线程回滚到最近一个合法的 checkpoint。
 
         该方法用于处理用户暂停、网络中断或工具回合异常等情况，确保后续仍能继续
@@ -314,18 +314,18 @@ class TravelAgentService:
         # 从 checkpoint 时间线里找出最近一个“工具调用已闭环”的状态。
         stable_checkpoint_id = await self._find_latest_valid_checkpoint_id(thread_id)
         # 同步更新业务表里的稳定 checkpoint 指针。
-        self._chat_store.set_stable_checkpoint_id(thread_id, stable_checkpoint_id)
+        self._chat_store.set_stable_checkpoint_id(user_id, thread_id, stable_checkpoint_id)
         # 删除稳定点之后的半成品 checkpoint，避免下轮恢复时再次读到脏状态。
         await self._prune_checkpoints_after(thread_id, stable_checkpoint_id)
 
-    async def _get_effective_checkpoint_id(self, thread_id: str) -> str | None:
+    async def _get_effective_checkpoint_id(self, user_id: str, thread_id: str) -> str | None:
         """读取线程当前应该作为下一轮起点的稳定 checkpoint。
 
         优先使用业务表里已经缓存好的稳定 checkpoint；如果没有，再从 checkpoint
         历史里动态扫描一次，并把结果回写到业务表。
         """
         # 先读业务表缓存，命中时可以避免每轮都扫描 checkpoint 历史。
-        stable_checkpoint_id = self._chat_store.get_stable_checkpoint_id(thread_id)
+        stable_checkpoint_id = self._chat_store.get_stable_checkpoint_id(user_id, thread_id)
         if stable_checkpoint_id:
             return stable_checkpoint_id
 
@@ -333,14 +333,14 @@ class TravelAgentService:
         stable_checkpoint_id = await self._find_latest_valid_checkpoint_id(thread_id)
         if stable_checkpoint_id:
             # 推导成功后顺手缓存，下次就能直接复用。
-            self._chat_store.set_stable_checkpoint_id(thread_id, stable_checkpoint_id)
+            self._chat_store.set_stable_checkpoint_id(user_id, thread_id, stable_checkpoint_id)
         return stable_checkpoint_id
 
-    async def _mark_thread_stable(self, thread_id: str) -> None:
+    async def _mark_thread_stable(self, user_id: str, thread_id: str) -> None:
         """在一轮成功结束后，记录线程当前最新稳定 checkpoint。"""
         # 成功回合完成后，最新 checkpoint 一定已经是安全可恢复状态。
         stable_checkpoint_id = await self._find_latest_valid_checkpoint_id(thread_id)
-        self._chat_store.set_stable_checkpoint_id(thread_id, stable_checkpoint_id)
+        self._chat_store.set_stable_checkpoint_id(user_id, thread_id, stable_checkpoint_id)
 
     async def _find_latest_valid_checkpoint_id(self, thread_id: str) -> str | None:
         """返回线程最近一个消息链合法的 checkpoint id。
