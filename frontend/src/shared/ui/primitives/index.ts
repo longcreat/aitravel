@@ -19,6 +19,8 @@ export { Input } from "./input";
 
 export { Textarea } from "./textarea";
 
+export { Switch } from "./switch";
+
 export * from "./dialog";
 export * from "./dropdown-menu";
 export * from "./toast";

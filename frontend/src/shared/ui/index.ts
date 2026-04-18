@@ -3,3 +3,6 @@
 // 旧代码的直接路径 import 仍继续有效（向后兼容）
 export * from "./primitives";
 export * from "./app-surface-sheet";
+export * from "./confirm-dialog";
+export * from "./page-back-button";
+export * from "./settings";

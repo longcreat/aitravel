@@ -6,8 +6,8 @@ import { AppSurfaceSheet, Button } from "@/shared/ui";
 
 function buttonClassName(isPrimary: boolean) {
   return isPrimary
-    ? "h-14 w-full rounded-full bg-primary text-[16px] font-semibold text-primary-foreground hover:bg-primary/92"
-    : "h-14 w-full rounded-full border border-border bg-white text-[16px] font-semibold text-ink hover:bg-secondary/40";
+    ? "bg-primary text-[16px] font-semibold text-primary-foreground hover:bg-primary/92"
+    : "border border-border bg-white text-[16px] font-semibold text-ink hover:bg-secondary/40";
 }
 
 export function AuthGateModal() {
@@ -44,6 +44,7 @@ export function AuthGateModal() {
           <Button
             type="button"
             aria-label="auth-gate-register"
+            size="hero"
             className={buttonClassName(registerPrimary)}
             onClick={() => handleOpenAuth("register")}
           >
@@ -52,6 +53,7 @@ export function AuthGateModal() {
           <Button
             type="button"
             aria-label="auth-gate-login"
+            size="hero"
             className={buttonClassName(!registerPrimary)}
             onClick={() => handleOpenAuth("login")}
           >

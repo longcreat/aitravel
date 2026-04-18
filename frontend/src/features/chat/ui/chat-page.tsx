@@ -1,11 +1,10 @@
-import { Brain, ChevronDown, CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Route, Trash2, User } from "lucide-react";
+import { CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Route, Trash2, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { useAuth } from "@/features/auth/model/auth.context";
 import type { SessionSummary } from "@/features/chat/model/chat.types";
 import { useChatAgent } from "@/features/chat/hooks/use-chat-agent";
-import { getCurrentLocationName, getLocationFallbackMessage } from "@/features/location/lib/amap-location";
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
 import { 
@@ -22,7 +21,6 @@ import {
   DialogDescription,
   DialogFooter,
   Input,
-  toast,
 } from "@/shared/ui";
 interface SessionGroup {
   label: "今日" | "7日" | "30日" | "更早";
@@ -58,28 +56,18 @@ const quickPromptItems = [
   },
 ] as const;
 
-function formatCurrentLocationName(locationName: string | null) {
-  if (!locationName) {
-    return "我当前的位置";
-  }
-
-  return locationName;
-}
-
-function buildQuickPrompt(kind: QuickPromptKind, locationName: string | null) {
-  const currentLocation = formatCurrentLocationName(locationName);
-
+function buildQuickPrompt(kind: QuickPromptKind) {
   switch (kind) {
     case "plan":
-      return `请根据${currentLocation}，帮我规划一个适合周末的短途旅行方案。`;
+      return "帮我安排一个轻松的周末出游计划";
     case "weather":
-      return `请查询${currentLocation}今天天气。`;
+      return "最近天气怎么样，适合出去玩吗？";
     case "spots":
-      return `请推荐几个适合${currentLocation}附近周末散心的景点。`;
+      return "推荐几个适合放松散心的旅行地点";
     case "route":
-      return `${currentLocation}，请推荐一个附近值得去的地方，并规划怎么走最方便。`;
+      return "帮我规划一条轻松省心的出行路线";
     default:
-      return `请根据${currentLocation}给我一些旅行建议。`;
+      return "给我一些适合轻松出游的旅行建议";
   }
 }
 
@@ -155,8 +143,6 @@ export function ChatPage() {
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
   const [renameSessionObj, setRenameSessionObj] = useState<{ id: string; title: string } | null>(null);
   const [renameInput, setRenameInput] = useState("");
-  const [currentLocationName, setCurrentLocationName] = useState<string | null>(null);
-  const [quickPromptLoadingKind, setQuickPromptLoadingKind] = useState<QuickPromptKind | null>(null);
   const [modelProfileSheetOpen, setModelProfileSheetOpen] = useState(false);
   
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -281,43 +267,12 @@ export function ChatPage() {
     setModelProfileSheetOpen(false);
   }
 
-  async function resolveCurrentLocationName() {
-    if (currentLocationName) {
-      return currentLocationName;
-    }
-
-    try {
-      const displayName = await getCurrentLocationName();
-      if (displayName) {
-        setCurrentLocationName(displayName);
-      }
-      return displayName;
-    } catch (locationError) {
-      toast({
-        description: getLocationFallbackMessage(locationError),
-      });
-      return null;
-    }
-  }
-
   async function handleQuickPromptClick(kind: QuickPromptKind) {
     if (!canStartRequest) {
       return;
     }
 
-    if (!isAuthenticated) {
-      await sendMessage(buildQuickPrompt(kind, null));
-      return;
-    }
-
-    setQuickPromptLoadingKind(kind);
-    try {
-      const locationName = await resolveCurrentLocationName();
-      const prompt = buildQuickPrompt(kind, locationName);
-      await sendMessage(prompt);
-    } finally {
-      setQuickPromptLoadingKind(null);
-    }
+    await sendMessage(buildQuickPrompt(kind));
   }
 
   function handleOpenProfile() {
@@ -477,7 +432,8 @@ export function ChatPage() {
                   <Button
                     type="button"
                     aria-label="login-or-register"
-                    className="h-14 w-full rounded-full bg-primary text-[16px] font-semibold text-primary-foreground hover:bg-primary/92"
+                    size="hero"
+                    className="bg-primary text-[16px] font-semibold text-primary-foreground hover:bg-primary/92"
                     onClick={() =>
                       openAuthModal({
                         redirectTo: "/chat",
@@ -501,28 +457,16 @@ export function ChatPage() {
         </div>
       ) : null}
 
-      <header className="relative bg-paper/80 px-4 pb-4 pt-[calc(0.9rem+env(safe-area-inset-top))] backdrop-blur">
-        <div className="relative flex items-center justify-between gap-3">
+      <header className="relative bg-paper/80 px-4 pb-2 pt-[calc(0.75rem+env(safe-area-inset-top))] backdrop-blur">
+        <div className="relative flex h-10 items-center justify-between gap-3">
           <div className="flex min-w-[44px] items-center">
             <Button size="icon" variant="ghost" aria-label="open-history" onClick={handleOpenHistory}>
               <List className="h-5 w-5 text-mint" />
             </Button>
           </div>
 
-          <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-center">
-            <div className="pointer-events-auto flex flex-col items-center gap-1">
-              <span className="text-[20px] font-semibold tracking-[-0.02em] text-[#2c2b28]">WANDER AI</span>
-              <button
-                type="button"
-                aria-label="model-profile-selector"
-                className="inline-flex items-center gap-1 rounded-full border border-black/[0.06] bg-white/90 px-3 py-1 text-[12px] font-medium text-[#6b6861] shadow-sm transition-colors hover:bg-white"
-                onClick={() => setModelProfileSheetOpen(true)}
-              >
-                <Brain className="h-3.5 w-3.5 text-mint" />
-                <span>{selectedModelProfileLabel}</span>
-                <ChevronDown className="h-3.5 w-3.5 opacity-60" />
-              </button>
-            </div>
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <span className="pointer-events-auto text-[20px] font-semibold tracking-[-0.02em] text-[#2c2b28]">WANDER AI</span>
           </div>
 
           <div className="flex min-w-[76px] justify-end">
@@ -569,7 +513,7 @@ export function ChatPage() {
                     key={item.label}
                     type="button"
                     aria-label={`quick-prompt-${item.label}`}
-                    disabled={!canStartRequest || quickPromptLoadingKind === item.kind}
+                    disabled={!canStartRequest}
                     className="flex items-center gap-2 rounded-full border border-border bg-white px-4 py-3 text-left text-[15px] font-medium text-[#6d6a64] shadow-sm transition-colors hover:bg-secondary/40 disabled:cursor-not-allowed disabled:opacity-70"
                     onClick={() => void handleQuickPromptClick(item.kind)}
                   >
@@ -605,18 +549,26 @@ export function ChatPage() {
         ) : null}
       </section>
 
-      <ChatComposer loading={loading} ready={authReady} onSend={sendMessage} onStop={stopGenerating} />
+      <ChatComposer
+        loading={loading}
+        ready={authReady}
+        modelProfileLabel={selectedModelProfileLabel}
+        onSend={sendMessage}
+        onOpenModelProfileSheet={() => setModelProfileSheetOpen(true)}
+        onStop={stopGenerating}
+      />
 
       <AppSurfaceSheet
         open={modelProfileSheetOpen}
         onClose={() => setModelProfileSheetOpen(false)}
         title="选择模型"
         description="根据问题复杂度切换响应模式。"
-        className="inset-x-auto bottom-4 left-1/2 w-[calc(100%-2.5rem)] max-w-[392px] -translate-x-1/2 rounded-[32px] border-none px-6 pb-6 pt-12 sm:bottom-6"
-        closeButtonClassName="right-5 top-5 h-10 w-10 p-0 leading-none opacity-100 [&>svg]:h-5 [&>svg]:w-5 [&>svg]:shrink-0"
+        className="inset-x-auto bottom-4 left-1/2 w-[calc(100%-2.5rem)] max-w-[392px] -translate-x-1/2 rounded-[32px] border-none px-5 pb-5 pt-10 sm:bottom-6"
+        descriptionClassName="mt-3 text-[14px] leading-6"
+        closeButtonClassName="right-4 top-4 h-9 w-9 p-0 leading-none opacity-100 [&>svg]:h-5 [&>svg]:w-5 [&>svg]:shrink-0"
         closeLabel="model-profile-sheet-close"
       >
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           {modelProfiles.map((profile) => {
             const isSelected = profile.key === selectedModelProfileKey;
 
@@ -626,18 +578,18 @@ export function ChatPage() {
                 type="button"
                 aria-label={`model-profile-option-${profile.key}`}
                 aria-pressed={isSelected}
-                className={`w-full rounded-[24px] border px-5 py-4 text-left transition-colors ${
+                className={`w-full rounded-[22px] border px-5 py-3.5 text-left transition-colors ${
                   isSelected
                     ? "border-[#eadfc9] bg-[#f6efe0] shadow-sm"
                     : "border-border bg-white hover:bg-secondary/30"
                 }`}
                 onClick={() => handleChooseModelProfile(profile.key)}
               >
-                <div className="flex min-w-0 flex-col">
+                <div className="flex min-w-0 items-baseline gap-3">
                   <span className={`text-[18px] font-semibold tracking-[-0.02em] ${isSelected ? "text-ink" : "text-[#3b3935]"}`}>
                     {profile.label}
                   </span>
-                  <span className={`mt-1 text-[14px] leading-6 ${isSelected ? "text-[#7a6d58]" : "text-muted-foreground"}`}>
+                  <span className={`text-[14px] leading-5 ${isSelected ? "text-[#7a6d58]" : "text-muted-foreground"}`}>
                     {getModelProfileDescription(profile.kind)}
                   </span>
                 </div>

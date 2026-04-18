@@ -1,6 +1,7 @@
 import AMapLoader from "@amap/amap-jsapi-loader";
 
 import { env } from "@/shared/config/env";
+import { isLocationPermissionEnabled } from "@/features/location/lib/location-permission";
 
 type LocationErrorCode =
   | "key-missing"
@@ -177,6 +178,10 @@ export function getLocationFallbackMessage(error: unknown): string {
 }
 
 export async function getCurrentLocationName(): Promise<string | null> {
+  if (!isLocationPermissionEnabled()) {
+    return null;
+  }
+
   const AMap = await loadAMap();
 
   return withTimeout(

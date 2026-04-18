@@ -51,12 +51,9 @@ frontend/
 
 ```bash
 cd backend
-python -m venv .venv
-# Windows
-.venv\\Scripts\\activate
-pip install -e .[dev]
+uv sync --frozen --extra dev
 copy .env.example .env
-uvicorn app.main:app --reload --port 8000
+uv run --frozen --env-file .env uvicorn app.main:create_app --factory --reload --reload-dir app --reload-dir config --host localhost --port 8000
 ```
 
 ## 前端启动
@@ -108,7 +105,7 @@ SSE 事件顺序：
 
 ```bash
 cd backend
-pytest
+uv run --frozen --extra dev pytest
 ```
 
 前端：

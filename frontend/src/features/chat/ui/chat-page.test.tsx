@@ -212,7 +212,7 @@ describe("ChatPage", () => {
     });
 
     expect(window.sessionStorage.getItem("ai-travel-pending-message")).toBe(
-      JSON.stringify({ message: "请查询我当前的位置今天天气。", model_profile_key: null }),
+      JSON.stringify({ message: "最近天气怎么样，适合出去玩吗？", model_profile_key: null }),
     );
   });
 
@@ -263,12 +263,12 @@ describe("ChatPage", () => {
     );
   });
 
-  it("uses AMap location name in quick prompt message when location is available", async () => {
-    setStoredAccessToken("token-location");
+  it("sends fixed quick prompt copy without reading location", async () => {
+    setStoredAccessToken("token-quick-prompt");
     setStoredAuthUser({
-      id: "user-location",
-      email: "location@example.com",
-      nickname: "location",
+      id: "user-quick-prompt",
+      email: "quick-prompt@example.com",
+      nickname: "quick",
       created_at: "2026-04-08T00:00:00Z",
       updated_at: "2026-04-08T00:00:00Z",
     });
@@ -286,9 +286,9 @@ describe("ChatPage", () => {
           ok: true,
           status: 200,
           json: async () => ({
-            id: "user-location",
-            email: "location@example.com",
-            nickname: "location",
+            id: "user-quick-prompt",
+            email: "quick-prompt@example.com",
+            nickname: "quick",
             created_at: "2026-04-08T00:00:00Z",
             updated_at: "2026-04-08T00:00:00Z",
           }),
@@ -321,7 +321,6 @@ describe("ChatPage", () => {
       };
     });
 
-    getCurrentLocationNameMock.mockResolvedValueOnce("杭州市西湖区");
     vi.stubGlobal("fetch", fetchMock);
     renderChatPage();
 
@@ -332,10 +331,11 @@ describe("ChatPage", () => {
         expect.stringContaining("/api/chat/stream"),
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining("杭州市西湖区"),
+          body: expect.stringContaining("最近天气怎么样，适合出去玩吗？"),
         }),
       );
     });
+    expect(getCurrentLocationNameMock).not.toHaveBeenCalled();
   });
 
   it("sends the selected model profile with a new thread message", async () => {
@@ -1095,7 +1095,7 @@ describe("ChatPage", () => {
 
     await userEvent.click(stepButton!);
     expect(await screen.findByText("Summary")).toBeInTheDocument();
-    expect(screen.getByText("amap search spots")).toBeInTheDocument();
+    expect(screen.getAllByText("amap search spots").length).toBeGreaterThan(0);
     expect(screen.getByText("搜索到 3 个景点")).toBeInTheDocument();
 
     const streamCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/stream"));

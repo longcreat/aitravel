@@ -1,4 +1,4 @@
-import { ArrowLeft, Mail } from "lucide-react";
+import { Mail } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -6,7 +6,7 @@ import { sendAuthCode, verifyAuthCode } from "@/features/auth/api/auth.api";
 import { useAuth } from "@/features/auth/model/auth.context";
 import type { AuthPurpose } from "@/features/auth/model/auth.types";
 import { MobileShell } from "@/shared/layouts/mobile-shell";
-import { Button, Dialog, DialogContent, DialogDescription, DialogTitle, Input } from "@/shared/ui";
+import { Button, ConfirmDialog, Input, PageBackButton } from "@/shared/ui";
 
 type AuthStep = "email" | "code";
 
@@ -106,16 +106,7 @@ export function AuthPage() {
     <MobileShell className="bg-paper">
       <div className="flex h-full w-full flex-col px-6 pb-8 pt-[calc(1rem+env(safe-area-inset-top))] sm:pt-16">
         <div className="flex items-center justify-between">
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            aria-label="back-auth"
-            className="h-14 w-14 rounded-full bg-white shadow-sm hover:bg-secondary/50"
-            onClick={handleBack}
-          >
-            <ArrowLeft className="h-7 w-7 text-ink" />
-          </Button>
+          <PageBackButton ariaLabel="back-auth" onClick={handleBack} />
           <div className="w-14" aria-hidden="true" />
         </div>
 
@@ -150,7 +141,8 @@ export function AuthPage() {
 
                 <Button
                   type="button"
-                  className="h-14 w-full rounded-full bg-primary text-[18px] font-semibold text-primary-foreground hover:bg-primary/92 disabled:bg-secondary disabled:text-muted-foreground"
+                  size="hero"
+                  className="bg-primary text-[18px] font-semibold text-primary-foreground hover:bg-primary/92 disabled:bg-secondary disabled:text-muted-foreground"
                   disabled={!email.trim() || sending}
                   onClick={() => void requestCode()}
                 >
@@ -177,7 +169,8 @@ export function AuthPage() {
 
                 <Button
                   type="button"
-                  className="h-14 w-full rounded-full bg-primary text-[18px] font-semibold text-primary-foreground hover:bg-primary/92 disabled:bg-secondary disabled:text-muted-foreground"
+                  size="hero"
+                  className="bg-primary text-[18px] font-semibold text-primary-foreground hover:bg-primary/92 disabled:bg-secondary disabled:text-muted-foreground"
                   disabled={verifying || code.trim().length !== 6}
                   onClick={() => void handleVerify()}
                 >
@@ -193,7 +186,8 @@ export function AuthPage() {
                 <Button
                   type="button"
                   variant="outline"
-                  className="h-14 w-full rounded-full border-border bg-white text-[18px] font-medium text-muted-foreground hover:bg-secondary/30"
+                  size="hero"
+                  className="border-border bg-white text-[18px] font-medium text-muted-foreground hover:bg-secondary/30"
                   disabled={sending}
                   onClick={() => void requestCode()}
                 >
@@ -205,33 +199,16 @@ export function AuthPage() {
         </div>
       </div>
 
-      <Dialog open={leaveConfirmOpen} onOpenChange={setLeaveConfirmOpen}>
-        <DialogContent className="w-[calc(100%-2.5rem)] max-w-[380px] rounded-[28px] border-none bg-white px-7 pb-7 pt-7 sm:rounded-[28px] [&>button]:hidden">
-          <DialogTitle className="text-left text-[20px] font-semibold tracking-[-0.02em] text-ink">
-            进度将不会保存
-          </DialogTitle>
-          <DialogDescription className="mt-4 text-left text-[15px] leading-7 text-muted-foreground">
-            如果现在退出认证页面，下次需要重新填写邮箱并开始操作。
-          </DialogDescription>
-
-          <div className="mt-8 flex items-center justify-end gap-8">
-            <button
-              type="button"
-              className="text-[16px] font-medium text-muted-foreground"
-              onClick={() => setLeaveConfirmOpen(false)}
-            >
-              返回
-            </button>
-            <button
-              type="button"
-              className="text-[16px] font-semibold text-ink"
-              onClick={handleLeavePage}
-            >
-              退出
-            </button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={leaveConfirmOpen}
+        onOpenChange={setLeaveConfirmOpen}
+        title="进度将不会保存"
+        description="如果现在退出认证页面，下次需要重新填写邮箱并开始操作。"
+        cancelLabel="返回"
+        confirmLabel="退出"
+        onCancel={() => setLeaveConfirmOpen(false)}
+        onConfirm={handleLeavePage}
+      />
     </MobileShell>
   );
 }

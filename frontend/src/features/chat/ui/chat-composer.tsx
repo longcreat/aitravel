@@ -1,4 +1,4 @@
-import { ArrowUp, Keyboard, Mic, Square } from "lucide-react";
+import { ArrowUp, Brain, ChevronDown, Keyboard, Mic, Square } from "lucide-react";
 import { FormEvent, useState, useRef, useEffect } from "react";
 
 import type { SendIntentResult } from "@/features/chat/model/chat.types";
@@ -7,11 +7,20 @@ import { Button } from "@/shared/ui";
 interface ChatComposerProps {
   loading: boolean;
   ready: boolean;
+  modelProfileLabel: string;
   onSend: (message: string) => Promise<SendIntentResult>;
+  onOpenModelProfileSheet: () => void;
   onStop: () => void;
 }
 
-export function ChatComposer({ loading, ready, onSend, onStop }: ChatComposerProps) {
+export function ChatComposer({
+  loading,
+  ready,
+  modelProfileLabel,
+  onSend,
+  onOpenModelProfileSheet,
+  onStop,
+}: ChatComposerProps) {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<"text" | "voice">("text");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -38,10 +47,23 @@ export function ChatComposer({ loading, ready, onSend, onStop }: ChatComposerPro
 
   return (
     <form
-      className="relative bottom-0 z-10 px-4 pb-4 pt-10 bg-gradient-to-t from-paper via-paper to-transparent"
+      className="relative bottom-0 z-10 px-4 pb-4 pt-2 bg-gradient-to-t from-paper via-paper to-transparent"
       onSubmit={handleSubmit}
     >
       <div className="mx-auto max-w-3xl">
+        <div className="mb-1.5 flex justify-start">
+          <button
+            type="button"
+            aria-label="model-profile-selector"
+            className="inline-flex items-center gap-1 rounded-full border border-black/[0.06] bg-white/90 px-3 py-1 text-[12px] font-medium text-[#6b6861] shadow-sm transition-colors hover:bg-white"
+            onClick={onOpenModelProfileSheet}
+          >
+            <Brain className="h-3.5 w-3.5 text-mint" />
+            <span>{modelProfileLabel}</span>
+            <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+          </button>
+        </div>
+
         {mode === "text" ? (
           <div className="group flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-4 py-3 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all focus-within:shadow-[0_8px_32px_-8px_rgba(0,0,0,0.10)]">
             <textarea

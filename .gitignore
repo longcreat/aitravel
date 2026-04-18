@@ -64,3 +64,5 @@ backend/pytest-cache-files-*
 frontend/vite.config.js
 frontend/vite.config.d.ts
 *.sql
+!backend/migrations/*.sql
+*.egg-info/
