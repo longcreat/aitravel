@@ -18,6 +18,7 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
 
     thread_id = "thread-a"
     user_message_id = store.append_user_message(user.id, thread_id, "这是一个非常长的第一句话用于测试标题规则")
+    assert isinstance(user_message_id, str)
     assistant_message_id, original_version_id = store.append_assistant_message(
         user.id,
         thread_id,
@@ -27,6 +28,8 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
         parent_checkpoint_id="cp-parent-1",
         result_checkpoint_id="cp-result-1",
     )
+    assert isinstance(assistant_message_id, str)
+    assert isinstance(original_version_id, str)
 
     sessions = store.list_sessions(user.id)
     assert len(sessions) == 1
@@ -46,6 +49,24 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
     assert detail.messages[1].versions[0].kind == "original"
     assert detail.messages[1].can_regenerate is True
 
+    assert store.upsert_speech_asset(
+        user.id,
+        thread_id,
+        assistant_message_id,
+        original_version_id,
+        status="generating",
+        mime_type="audio/mpeg",
+    ) is True
+    speech_asset = store.get_speech_asset(user.id, thread_id, assistant_message_id, original_version_id)
+    assert speech_asset is not None
+    assert speech_asset.status == "generating"
+    assert speech_asset.mime_type == "audio/mpeg"
+
+    detail_with_speech = store.get_session_detail(user.id, thread_id)
+    assert detail_with_speech is not None
+    assert detail_with_speech.messages[1].versions[0].speech_status == "generating"
+    assert detail_with_speech.messages[1].versions[0].speech_mime_type == "audio/mpeg"
+
     regeneration_target = store.get_regeneration_target(user.id, thread_id, assistant_message_id)
     assert regeneration_target is not None
     assert regeneration_target.user_message_text == "这是一个非常长的第一句话用于测试标题规则"
@@ -61,6 +82,7 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
         result_checkpoint_id="cp-result-2",
     )
     assert regenerated_version_id is not None
+    assert isinstance(regenerated_version_id, str)
 
     regenerated_version_id_2 = store.upsert_regenerated_version(
         user.id,
@@ -72,6 +94,7 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
         result_checkpoint_id="cp-result-3",
     )
     assert regenerated_version_id_2 is not None
+    assert isinstance(regenerated_version_id_2, str)
 
     with pytest.raises(ValueError, match="最多生成三次无法重新生成"):
         store.upsert_regenerated_version(
@@ -110,7 +133,7 @@ def test_sqlite_store_bootstraps_from_versioned_schema(tmp_path: Path) -> None:
     assert applied_initial == [1]
 
     applied_remaining = run_sqlite_migrations(db_path)
-    assert applied_remaining == [2, 3]
+    assert applied_remaining == [2, 3, 4]
 
     store = ChatSQLiteStore(db_path)
     auth_store = AuthSQLiteStore(db_path)
@@ -132,6 +155,7 @@ def test_sqlite_store_bootstraps_from_versioned_schema(tmp_path: Path) -> None:
     assert detail.model_profile_key == "standard"
     assert detail.messages[1].id == assistant_message_id
     assert detail.messages[1].current_version_id == current_version_id
+    assert isinstance(current_version_id, str)
 
 
 def test_sqlite_store_updates_session_model_profile(tmp_path: Path) -> None:

@@ -585,6 +585,13 @@ export function useChatAgent(initialThreadId?: string) {
     return detail;
   }, []);
 
+  const refreshCurrentThread = useCallback(async () => {
+    if (!isAuthenticated || !currentThreadIsPersisted) {
+      return;
+    }
+    await hydrateThreadMessages(threadId);
+  }, [currentThreadIsPersisted, hydrateThreadMessages, isAuthenticated, threadId]);
+
   useEffect(() => {
     void refreshModelProfiles();
   }, [refreshModelProfiles]);
@@ -915,7 +922,7 @@ export function useChatAgent(initialThreadId?: string) {
     return intent;
   }
 
-  async function regenerateLatestAssistantMessage(messageId: number) {
+  async function regenerateLatestAssistantMessage(messageId: string) {
     if (loading || !isAuthenticated) {
       return;
     }
@@ -1084,7 +1091,7 @@ export function useChatAgent(initialThreadId?: string) {
     }
   }
 
-  async function selectAssistantVersion(messageId: number, versionId: number) {
+  async function selectAssistantVersion(messageId: string, versionId: string) {
     const targetThreadId = threadId;
     await switchAssistantVersion(targetThreadId, messageId, { version_id: versionId });
     if (activeThreadIdRef.current === targetThreadId) {
@@ -1093,7 +1100,7 @@ export function useChatAgent(initialThreadId?: string) {
     await refreshSessions();
   }
 
-  async function setAssistantFeedback(messageId: number, versionId: number, feedback: AssistantVersionFeedback) {
+  async function setAssistantFeedback(messageId: string, versionId: string, feedback: AssistantVersionFeedback) {
     const targetThreadId = threadId;
     await updateAssistantFeedback(targetThreadId, messageId, versionId, { feedback });
     if (activeThreadIdRef.current === targetThreadId) {
@@ -1153,5 +1160,6 @@ export function useChatAgent(initialThreadId?: string) {
     setAssistantFeedback,
     updateCurrentModelProfile,
     retryLastSubmittedMessage,
+    refreshCurrentThread,
   };
 }

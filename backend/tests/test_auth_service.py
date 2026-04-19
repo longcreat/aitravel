@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import smtplib
+import socket
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from app.auth.service import AuthService
 
@@ -141,3 +144,83 @@ def test_auth_service_requires_jwt_secret(monkeypatch, tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="JWT_SECRET"):
         AuthService(sqlite_db_path=db_path)
+
+
+def test_auth_service_surfaces_dns_failures(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    _set_base_env(monkeypatch, db_path, "994")
+
+    def _broken_smtp_ssl(*args, **kwargs):
+        raise socket.gaierror(11003, "getaddrinfo failed")
+
+    monkeypatch.setattr("app.auth.service.smtplib.SMTP_SSL", _broken_smtp_ssl)
+
+    service = AuthService(sqlite_db_path=db_path)
+
+    with pytest.raises(HTTPException) as excinfo:
+        service._send_email(email="user@example.com", code="123456", purpose="login")
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "SMTP 域名解析失败，请检查 SMTP_HOST 和本机 DNS 配置"
+
+
+def test_auth_service_surfaces_auth_failures(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    _set_base_env(monkeypatch, db_path, "994")
+
+    class _FakeSMTPSSL:
+        def __init__(self, host: str, port: int, timeout: int) -> None:
+            return None
+
+        def __enter__(self) -> "_FakeSMTPSSL":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def login(self, username: str, password: str) -> None:
+            raise smtplib.SMTPAuthenticationError(535, b"Auth failed")
+
+    monkeypatch.setattr("app.auth.service.smtplib.SMTP_SSL", _FakeSMTPSSL)
+
+    service = AuthService(sqlite_db_path=db_path)
+
+    with pytest.raises(HTTPException) as excinfo:
+        service._send_email(email="user@example.com", code="123456", purpose="login")
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "SMTP 认证失败，请检查 SMTP_USERNAME 与 SMTP_PASSWORD，部分邮箱需要客户端授权码"
+
+
+def test_auth_service_surfaces_disconnect_failures(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    _set_base_env(monkeypatch, db_path, "587")
+
+    class _FakeSMTP:
+        def __init__(self, host: str, port: int, timeout: int) -> None:
+            return None
+
+        def __enter__(self) -> "_FakeSMTP":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def ehlo(self) -> None:
+            return None
+
+        def starttls(self) -> None:
+            return None
+
+        def login(self, username: str, password: str) -> None:
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr("app.auth.service.smtplib.SMTP", _FakeSMTP)
+
+    service = AuthService(sqlite_db_path=db_path)
+
+    with pytest.raises(HTTPException) as excinfo:
+        service._send_email(email="user@example.com", code="123456", purpose="register")
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "SMTP 连接被服务端断开，请检查 SMTP_HOST、SMTP_PORT 与 SSL/TLS 模式是否匹配"

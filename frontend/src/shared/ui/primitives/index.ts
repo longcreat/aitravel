@@ -17,6 +17,8 @@ export {
 
 export { Input } from "./input";
 
+export { FlatingInput } from "./flating-input";
+
 export { Textarea } from "./textarea";
 
 export { Switch } from "./switch";

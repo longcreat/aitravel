@@ -1,12 +1,14 @@
 import { CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Route, Trash2, User } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { useAuth } from "@/features/auth/model/auth.context";
-import type { SessionSummary } from "@/features/chat/model/chat.types";
+import { getAssistantSpeechPlaybackUrl } from "@/features/chat/api/chat.api";
+import type { ChatMessageItem, SessionSummary } from "@/features/chat/model/chat.types";
 import { useChatAgent } from "@/features/chat/hooks/use-chat-agent";
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
+import { HttpError } from "@/shared/lib/http";
 import { 
   AppSurfaceSheet,
   Button, 
@@ -75,6 +77,29 @@ function getModelProfileDescription(kind: "standard" | "thinking") {
   return kind === "thinking" ? "深度推理" : "快速响应";
 }
 
+function getCurrentAssistantVersionId(message: ChatMessageItem): string | null {
+  const versions = message.versions ?? [];
+  const currentVersion =
+    versions.find((item) => item.id === message.current_version_id) ??
+    versions[versions.length - 1] ??
+    null;
+  return currentVersion?.id ?? null;
+}
+
+function getSpeechMessageKey(message: ChatMessageItem): string | null {
+  if (!message.id.startsWith("persisted-")) {
+    return null;
+  }
+
+  const persistedMessageId = message.id.slice("persisted-".length);
+  const versionId = getCurrentAssistantVersionId(message);
+  if (!persistedMessageId || versionId == null) {
+    return null;
+  }
+
+  return `${persistedMessageId}:${versionId}`;
+}
+
 function groupSessionsByUpdatedAt(sessions: SessionSummary[]): SessionGroup[] {
   const groups: SessionGroup[] = [
     { label: "今日", items: [] },
@@ -137,6 +162,7 @@ export function ChatPage() {
     setAssistantFeedback,
     updateCurrentModelProfile,
     retryLastSubmittedMessage,
+    refreshCurrentThread,
   } = useChatAgent(routeThreadId);
 
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -144,11 +170,14 @@ export function ChatPage() {
   const [renameSessionObj, setRenameSessionObj] = useState<{ id: string; title: string } | null>(null);
   const [renameInput, setRenameInput] = useState("");
   const [modelProfileSheetOpen, setModelProfileSheetOpen] = useState(false);
+  const [playingSpeechKey, setPlayingSpeechKey] = useState<string | null>(null);
   
   const listRef = useRef<HTMLDivElement | null>(null);
   const pendingNewThreadIdRef = useRef<string | null>(null);
   const openedRouteThreadIdRef = useRef<string | null>(null);
   const routeThreadIdRef = useRef(routeThreadId);
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const playingSpeechKeyRef = useRef<string | null>(null);
   routeThreadIdRef.current = routeThreadId;
   const groupedSessions = useMemo(() => groupSessionsByUpdatedAt(sessions), [sessions]);
   const profileInitial = useMemo(() => {
@@ -164,6 +193,27 @@ export function ChatPage() {
     }
     node.scrollTop = node.scrollHeight;
   }, [messages, loading]);
+
+  const stopSpeechPlayback = useCallback(() => {
+    const activeAudio = activeAudioRef.current;
+    if (activeAudio) {
+      activeAudio.pause();
+      activeAudio.src = "";
+      activeAudioRef.current = null;
+    }
+    playingSpeechKeyRef.current = null;
+    setPlayingSpeechKey(null);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopSpeechPlayback();
+    };
+  }, [stopSpeechPlayback]);
+
+  useEffect(() => {
+    stopSpeechPlayback();
+  }, [stopSpeechPlayback, threadId]);
 
   useEffect(() => {
     if (!threadId || routeThreadIdRef.current) {
@@ -273,6 +323,50 @@ export function ChatPage() {
     }
 
     await sendMessage(buildQuickPrompt(kind));
+  }
+
+  async function handleToggleSpeech(messageId: string, versionId: string) {
+    const speechKey = `${messageId}:${versionId}`;
+    if (playingSpeechKeyRef.current === speechKey) {
+      stopSpeechPlayback();
+      return;
+    }
+
+    try {
+      stopSpeechPlayback();
+      const { playback_url } = await getAssistantSpeechPlaybackUrl(threadId, messageId, versionId);
+      const nextAudio = new Audio(playback_url);
+      const clearIfCurrent = () => {
+        if (activeAudioRef.current !== nextAudio) {
+          return;
+        }
+        activeAudioRef.current = null;
+        playingSpeechKeyRef.current = null;
+        setPlayingSpeechKey(null);
+      };
+
+      nextAudio.addEventListener("ended", clearIfCurrent);
+      nextAudio.addEventListener("error", clearIfCurrent);
+      activeAudioRef.current = nextAudio;
+      playingSpeechKeyRef.current = speechKey;
+      setPlayingSpeechKey(speechKey);
+      await nextAudio.play();
+    } catch (playbackError) {
+      stopSpeechPlayback();
+      if (playbackError instanceof HttpError && playbackError.status === 409) {
+        void refreshCurrentThread();
+      }
+    }
+  }
+
+  async function handleRegenerateAssistantMessage(messageId: string) {
+    stopSpeechPlayback();
+    await regenerateLatestAssistantMessage(messageId);
+  }
+
+  async function handleSelectAssistantVersion(messageId: string, versionId: string) {
+    stopSpeechPlayback();
+    await selectAssistantVersion(messageId, versionId);
   }
 
   function handleOpenProfile() {
@@ -530,9 +624,11 @@ export function ChatPage() {
           <ChatMessage
             key={message.id}
             message={message}
-            onRegenerate={regenerateLatestAssistantMessage}
-            onSwitchVersion={selectAssistantVersion}
+            onRegenerate={handleRegenerateAssistantMessage}
+            onSwitchVersion={handleSelectAssistantVersion}
             onFeedback={setAssistantFeedback}
+            onToggleSpeech={handleToggleSpeech}
+            isSpeechPlaying={playingSpeechKey === getSpeechMessageKey(message)}
           />
         ))}
 

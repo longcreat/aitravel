@@ -25,7 +25,15 @@ def test_bootstrap_sqlite_database_creates_full_schema(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-    assert {"schema_migrations", "users", "email_login_codes", "chat_sessions", "chat_messages", "assistant_message_versions"} <= tables
+    assert {
+        "schema_migrations",
+        "users",
+        "email_login_codes",
+        "chat_sessions",
+        "chat_messages",
+        "assistant_message_versions",
+        "assistant_version_speech_assets",
+    } <= tables
 
 
 def test_run_sqlite_migrations_is_idempotent(tmp_path: Path) -> None:
@@ -34,7 +42,7 @@ def test_run_sqlite_migrations_is_idempotent(tmp_path: Path) -> None:
     first = run_sqlite_migrations(db_path)
     second = run_sqlite_migrations(db_path)
 
-    assert first == [1, 2, 3]
+    assert first == [1, 2, 3, 4]
     assert second == []
 
 
@@ -60,7 +68,7 @@ def test_bootstrap_sqlite_database_reset_recreates_database(tmp_path: Path) -> N
     finally:
         conn.close()
 
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
 
 
 def test_run_sqlite_migrations_rejects_unversioned_legacy_database(tmp_path: Path) -> None:
@@ -82,4 +90,37 @@ def test_run_sqlite_migrations_rejects_unversioned_legacy_database(tmp_path: Pat
         conn.close()
 
     with pytest.raises(RuntimeError, match="未版本化"):
+        run_sqlite_migrations(db_path)
+
+
+def test_run_sqlite_migrations_rejects_versioned_legacy_integer_chat_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-versioned.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              applied_at TEXT NOT NULL
+            );
+
+            INSERT INTO schema_migrations (version, name, applied_at)
+            VALUES (1, 'auth_tables', '2026-04-19T00:00:00Z');
+
+            CREATE TABLE chat_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              thread_id TEXT NOT NULL,
+              role TEXT NOT NULL,
+              text TEXT NOT NULL,
+              reply_to_message_id INTEGER,
+              created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(RuntimeError, match="整数型聊天 schema"):
         run_sqlite_migrations(db_path)

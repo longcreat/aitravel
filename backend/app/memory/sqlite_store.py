@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from app.schemas.chat import AssistantVersion, ChatMetaInfo, PersistedChatMessage, SessionDetail, SessionSummary
 
@@ -16,20 +17,20 @@ from app.schemas.chat import AssistantVersion, ChatMetaInfo, PersistedChatMessag
 class AssistantMessageRegenerationTarget:
     """重新生成 assistant 回复所需的最小上下文。"""
 
-    message_id: int
-    reply_to_message_id: int
+    message_id: str
+    reply_to_message_id: str
     user_message_text: str
-    original_version_id: int
+    original_version_id: str
     original_parent_checkpoint_id: str | None
-    current_version_id: int | None
+    current_version_id: str | None
 
 
 @dataclass
 class StoredAssistantMessageVersion:
     """内部使用的 assistant version 结构。"""
 
-    id: int
-    assistant_message_id: int
+    id: str
+    assistant_message_id: str
     version_index: int
     kind: str
     text: str
@@ -37,12 +38,32 @@ class StoredAssistantMessageVersion:
     feedback: str | None
     parent_checkpoint_id: str | None
     result_checkpoint_id: str | None
+    speech_status: str | None
+    speech_mime_type: str | None
     created_at: str
+
+
+@dataclass
+class StoredAssistantSpeechAsset:
+    """内部使用的 assistant 语音资产结构。"""
+
+    assistant_message_version_id: str
+    status: str
+    mime_type: str | None
+    object_key: str | None
+    error_message: str | None
+    created_at: str
+    updated_at: str
 
 
 def _utc_now_iso() -> str:
     """返回 UTC ISO 时间戳字符串。"""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _new_chat_entity_id() -> str:
+    """生成聊天域 opaque ID。"""
+    return str(uuid4())
 
 
 def _default_title_from_text(text: str) -> str:
@@ -124,9 +145,10 @@ class ChatSQLiteStore:
 
     def append_user_message(
         self, user_id: str, thread_id: str, text: str, *, model_profile_key: str = "standard"
-    ) -> int:
+    ) -> str:
         """写入用户消息，并在必要时创建会话。"""
         now = _utc_now_iso()
+        message_id = _new_chat_entity_id()
         with self._connection() as conn:
             existing = conn.execute(
                 "SELECT thread_id FROM chat_sessions WHERE thread_id = ? AND user_id = ?",
@@ -153,15 +175,14 @@ class ChatSQLiteStore:
                     (now, _preview(text), thread_id, user_id),
                 )
 
-            result = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO chat_messages (
-                  thread_id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
-                ) VALUES (?, 'user', ?, NULL, NULL, NULL, ?)
+                  id, thread_id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
+                ) VALUES (?, ?, 'user', ?, NULL, NULL, NULL, ?)
                 """,
-                (thread_id, text, now),
+                (message_id, thread_id, text, now),
             )
-            message_id = int(result.lastrowid)
         return message_id
 
     def append_assistant_message(
@@ -171,25 +192,28 @@ class ChatSQLiteStore:
         text: str,
         *,
         meta: dict[str, object],
-        reply_to_message_id: int,
+        reply_to_message_id: str,
         parent_checkpoint_id: str | None,
         result_checkpoint_id: str | None,
-    ) -> tuple[int, int]:
+    ) -> tuple[str, str]:
         """写入助手消息并更新会话活跃时间。"""
         now = _utc_now_iso()
+        assistant_message_id = _new_chat_entity_id()
+        version_id = _new_chat_entity_id()
+        meta_json = json.dumps(meta, ensure_ascii=False)
         with self._connection() as conn:
-            message_result = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO chat_messages (
-                  thread_id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
-                ) VALUES (?, 'assistant', ?, ?, ?, NULL, ?)
+                  id, thread_id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
+                ) VALUES (?, ?, 'assistant', ?, ?, ?, NULL, ?)
                 """,
-                (thread_id, text, json.dumps(meta, ensure_ascii=False), reply_to_message_id, now),
+                (assistant_message_id, thread_id, text, meta_json, reply_to_message_id, now),
             )
-            assistant_message_id = int(message_result.lastrowid)
-            version_result = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO assistant_message_versions (
+                  id,
                   assistant_message_id,
                   version_index,
                   kind,
@@ -199,18 +223,18 @@ class ChatSQLiteStore:
                   parent_checkpoint_id,
                   result_checkpoint_id,
                   created_at
-                ) VALUES (?, 1, 'original', ?, ?, NULL, ?, ?, ?)
+                ) VALUES (?, ?, 1, 'original', ?, ?, NULL, ?, ?, ?)
                 """,
                 (
+                    version_id,
                     assistant_message_id,
                     text,
-                    json.dumps(meta, ensure_ascii=False),
+                    meta_json,
                     parent_checkpoint_id,
                     result_checkpoint_id,
                     now,
                 ),
             )
-            version_id = int(version_result.lastrowid)
             conn.execute(
                 """
                 UPDATE chat_messages
@@ -234,9 +258,44 @@ class ChatSQLiteStore:
             return None
         return ChatMetaInfo.model_validate(json.loads(meta_payload))
 
+    def _load_speech_assets_by_version_id(
+        self, conn: sqlite3.Connection, thread_id: str
+    ) -> dict[str, StoredAssistantSpeechAsset]:
+        rows = conn.execute(
+            """
+            SELECT
+              a.assistant_message_version_id,
+              a.status,
+              a.mime_type,
+              a.object_key,
+              a.error_message,
+              a.created_at,
+              a.updated_at
+            FROM assistant_version_speech_assets a
+            INNER JOIN assistant_message_versions v ON v.id = a.assistant_message_version_id
+            INNER JOIN chat_messages m ON m.id = v.assistant_message_id
+            WHERE m.thread_id = ?
+            """,
+            (thread_id,),
+        ).fetchall()
+
+        return {
+            str(row["assistant_message_version_id"]): StoredAssistantSpeechAsset(
+                assistant_message_version_id=str(row["assistant_message_version_id"]),
+                status=str(row["status"]),
+                mime_type=str(row["mime_type"]) if row["mime_type"] else None,
+                object_key=str(row["object_key"]) if row["object_key"] else None,
+                error_message=str(row["error_message"]) if row["error_message"] else None,
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+            )
+            for row in rows
+        }
+
     def _load_versions_by_message_id(
         self, conn: sqlite3.Connection, thread_id: str
-    ) -> dict[int, list[StoredAssistantMessageVersion]]:
+    ) -> dict[str, list[StoredAssistantMessageVersion]]:
+        speech_assets_by_version_id = self._load_speech_assets_by_version_id(conn, thread_id)
         rows = conn.execute(
             """
             SELECT
@@ -253,16 +312,18 @@ class ChatSQLiteStore:
             FROM assistant_message_versions v
             INNER JOIN chat_messages m ON m.id = v.assistant_message_id
             WHERE m.thread_id = ?
-            ORDER BY v.assistant_message_id ASC, v.version_index ASC
+            ORDER BY m.created_at ASC, m.rowid ASC, v.version_index ASC
             """,
             (thread_id,),
         ).fetchall()
 
-        grouped: dict[int, list[StoredAssistantMessageVersion]] = {}
+        grouped: dict[str, list[StoredAssistantMessageVersion]] = {}
         for row in rows:
+            version_id = str(row["id"])
+            speech_asset = speech_assets_by_version_id.get(version_id)
             item = StoredAssistantMessageVersion(
-                id=int(row["id"]),
-                assistant_message_id=int(row["assistant_message_id"]),
+                id=version_id,
+                assistant_message_id=str(row["assistant_message_id"]),
                 version_index=int(row["version_index"]),
                 kind=str(row["kind"]),
                 text=str(row["text"]),
@@ -270,6 +331,8 @@ class ChatSQLiteStore:
                 feedback=str(row["feedback"]) if row["feedback"] else None,
                 parent_checkpoint_id=str(row["parent_checkpoint_id"]) if row["parent_checkpoint_id"] else None,
                 result_checkpoint_id=str(row["result_checkpoint_id"]) if row["result_checkpoint_id"] else None,
+                speech_status=speech_asset.status if speech_asset else None,
+                speech_mime_type=speech_asset.mime_type if speech_asset else None,
                 created_at=str(row["created_at"]),
             )
             grouped.setdefault(item.assistant_message_id, []).append(item)
@@ -318,19 +381,19 @@ class ChatSQLiteStore:
                 SELECT id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
                 FROM chat_messages
                 WHERE thread_id = ?
-                ORDER BY id ASC
+                ORDER BY created_at ASC, rowid ASC
                 """,
                 (thread_id,),
             ).fetchall()
             versions_by_message_id = self._load_versions_by_message_id(conn, thread_id)
 
         messages: list[PersistedChatMessage] = []
-        latest_assistant_id = max(
-            (int(row["id"]) for row in message_rows if str(row["role"]) == "assistant"),
-            default=0,
+        latest_assistant_id = next(
+            (str(row["id"]) for row in reversed(message_rows) if str(row["role"]) == "assistant"),
+            None,
         )
         for row in message_rows:
-            message_id = int(row["id"])
+            message_id = str(row["id"])
             role = str(row["role"])
             version_models = [
                 AssistantVersion(
@@ -340,6 +403,8 @@ class ChatSQLiteStore:
                     text=version.text,
                     meta=version.meta,
                     feedback=version.feedback,  # type: ignore[arg-type]
+                    speech_status=version.speech_status,  # type: ignore[arg-type]
+                    speech_mime_type=version.speech_mime_type,
                     created_at=version.created_at,
                 )
                 for version in versions_by_message_id.get(message_id, [])
@@ -354,8 +419,8 @@ class ChatSQLiteStore:
                     role=role,  # type: ignore[arg-type]
                     text=str(row["text"]),
                     meta=self._parse_meta_payload(row["meta_json"]),
-                    reply_to_message_id=int(row["reply_to_message_id"]) if row["reply_to_message_id"] else None,
-                    current_version_id=int(row["current_version_id"]) if row["current_version_id"] else None,
+                    reply_to_message_id=str(row["reply_to_message_id"]) if row["reply_to_message_id"] else None,
+                    current_version_id=str(row["current_version_id"]) if row["current_version_id"] else None,
                     versions=version_models,
                     can_regenerate=role == "assistant"
                     and message_id == latest_assistant_id
@@ -451,7 +516,7 @@ class ChatSQLiteStore:
         return deleted
 
     def get_regeneration_target(
-        self, user_id: str, thread_id: str, assistant_message_id: int
+        self, user_id: str, thread_id: str, assistant_message_id: str
     ) -> AssistantMessageRegenerationTarget | None:
         """返回重新生成 assistant 回复所需上下文。"""
         with self._connection() as conn:
@@ -460,12 +525,12 @@ class ChatSQLiteStore:
                 SELECT id
                 FROM chat_messages
                 WHERE thread_id = ? AND role = 'assistant'
-                ORDER BY id DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (thread_id,),
             ).fetchone()
-            if latest_assistant_row is None or int(latest_assistant_row["id"]) != assistant_message_id:
+            if latest_assistant_row is None or str(latest_assistant_row["id"]) != assistant_message_id:
                 return None
 
             row = conn.execute(
@@ -502,27 +567,29 @@ class ChatSQLiteStore:
             return None
 
         return AssistantMessageRegenerationTarget(
-            message_id=int(row["id"]),
-            reply_to_message_id=int(row["reply_to_message_id"]),
+            message_id=str(row["id"]),
+            reply_to_message_id=str(row["reply_to_message_id"]),
             user_message_text=str(row["user_message_text"]),
-            original_version_id=int(row["original_version_id"]),
+            original_version_id=str(row["original_version_id"]),
             original_parent_checkpoint_id=original_parent_checkpoint_id,
-            current_version_id=int(row["current_version_id"]) if row["current_version_id"] else None,
+            current_version_id=str(row["current_version_id"]) if row["current_version_id"] else None,
         )
 
     def upsert_regenerated_version(
         self,
         user_id: str,
         thread_id: str,
-        assistant_message_id: int,
+        assistant_message_id: str,
         *,
         text: str,
         meta: dict[str, object],
         parent_checkpoint_id: str | None,
         result_checkpoint_id: str | None,
-    ) -> int | None:
+    ) -> str | None:
         """写入新的重生版本并切到该版本。最多保留 3 个版本（原始版 + 2 次重生）。"""
         now = _utc_now_iso()
+        version_id = _new_chat_entity_id()
+        meta_json = json.dumps(meta, ensure_ascii=False)
         with self._connection() as conn:
             owner = conn.execute(
                 """
@@ -535,7 +602,6 @@ class ChatSQLiteStore:
             if owner is None:
                 return None
 
-            # 查出当前最大 version_index，新版本在其基础上 +1。
             max_row = conn.execute(
                 """
                 SELECT MAX(version_index) AS max_idx
@@ -548,9 +614,10 @@ class ChatSQLiteStore:
             if next_version_index > self.MAX_ASSISTANT_VERSIONS:
                 raise ValueError("最多生成三次无法重新生成")
 
-            result = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO assistant_message_versions (
+                  id,
                   assistant_message_id,
                   version_index,
                   kind,
@@ -560,19 +627,19 @@ class ChatSQLiteStore:
                   parent_checkpoint_id,
                   result_checkpoint_id,
                   created_at
-                ) VALUES (?, ?, 'regenerated', ?, ?, NULL, ?, ?, ?)
+                ) VALUES (?, ?, ?, 'regenerated', ?, ?, NULL, ?, ?, ?)
                 """,
                 (
+                    version_id,
                     assistant_message_id,
                     next_version_index,
                     text,
-                    json.dumps(meta, ensure_ascii=False),
+                    meta_json,
                     parent_checkpoint_id,
                     result_checkpoint_id,
                     now,
                 ),
             )
-            version_id = int(result.lastrowid)
 
             conn.execute(
                 """
@@ -580,7 +647,7 @@ class ChatSQLiteStore:
                 SET text = ?, meta_json = ?, current_version_id = ?
                 WHERE id = ? AND thread_id = ?
                 """,
-                (text, json.dumps(meta, ensure_ascii=False), version_id, assistant_message_id, thread_id),
+                (text, meta_json, version_id, assistant_message_id, thread_id),
             )
             conn.execute(
                 """
@@ -593,7 +660,7 @@ class ChatSQLiteStore:
         return version_id
 
     def switch_assistant_version(
-        self, user_id: str, thread_id: str, assistant_message_id: int, version_id: int
+        self, user_id: str, thread_id: str, assistant_message_id: str, version_id: str
     ) -> PersistedChatMessage | None:
         """切换 assistant 当前展示版本。"""
         with self._connection() as conn:
@@ -602,12 +669,12 @@ class ChatSQLiteStore:
                 SELECT id
                 FROM chat_messages
                 WHERE thread_id = ? AND role = 'assistant'
-                ORDER BY id DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (thread_id,),
             ).fetchone()
-            if latest_assistant_row is None or int(latest_assistant_row["id"]) != assistant_message_id:
+            if latest_assistant_row is None or str(latest_assistant_row["id"]) != assistant_message_id:
                 return None
 
             version_row = conn.execute(
@@ -661,7 +728,7 @@ class ChatSQLiteStore:
         return next((message for message in detail.messages if message.id == assistant_message_id), None)
 
     def update_assistant_feedback(
-        self, user_id: str, thread_id: str, assistant_message_id: int, version_id: int, feedback: str | None
+        self, user_id: str, thread_id: str, assistant_message_id: str, version_id: str, feedback: str | None
     ) -> PersistedChatMessage | None:
         """更新 assistant version 点赞/点踩状态。"""
         with self._connection() as conn:
@@ -687,6 +754,93 @@ class ChatSQLiteStore:
         if detail is None:
             return None
         return next((message for message in detail.messages if message.id == assistant_message_id), None)
+
+    def upsert_speech_asset(
+        self,
+        user_id: str,
+        thread_id: str,
+        assistant_message_id: str,
+        version_id: str,
+        *,
+        status: str,
+        mime_type: str | None,
+        object_key: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        """创建或更新 assistant version 语音资产。"""
+        now = _utc_now_iso()
+        speech_asset_id = _new_chat_entity_id()
+        with self._connection() as conn:
+            owner = conn.execute(
+                """
+                SELECT 1
+                FROM assistant_message_versions v
+                INNER JOIN chat_messages m ON m.id = v.assistant_message_id
+                INNER JOIN chat_sessions s ON s.thread_id = m.thread_id
+                WHERE v.id = ? AND m.id = ? AND m.thread_id = ? AND s.user_id = ?
+                """,
+                (version_id, assistant_message_id, thread_id, user_id),
+            ).fetchone()
+            if owner is None:
+                return False
+
+            conn.execute(
+                """
+                INSERT INTO assistant_version_speech_assets (
+                  id,
+                  assistant_message_version_id,
+                  status,
+                  mime_type,
+                  object_key,
+                  error_message,
+                  created_at,
+                  updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(assistant_message_version_id) DO UPDATE SET
+                  status = excluded.status,
+                  mime_type = excluded.mime_type,
+                  object_key = excluded.object_key,
+                  error_message = excluded.error_message,
+                  updated_at = excluded.updated_at
+                """,
+                (speech_asset_id, version_id, status, mime_type, object_key, error_message, now, now),
+            )
+        return True
+
+    def get_speech_asset(
+        self, user_id: str, thread_id: str, assistant_message_id: str, version_id: str
+    ) -> StoredAssistantSpeechAsset | None:
+        """读取 assistant version 语音资产。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                  a.assistant_message_version_id,
+                  a.status,
+                  a.mime_type,
+                  a.object_key,
+                  a.error_message,
+                  a.created_at,
+                  a.updated_at
+                FROM assistant_version_speech_assets a
+                INNER JOIN assistant_message_versions v ON v.id = a.assistant_message_version_id
+                INNER JOIN chat_messages m ON m.id = v.assistant_message_id
+                INNER JOIN chat_sessions s ON s.thread_id = m.thread_id
+                WHERE v.id = ? AND m.id = ? AND m.thread_id = ? AND s.user_id = ?
+                """,
+                (version_id, assistant_message_id, thread_id, user_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return StoredAssistantSpeechAsset(
+            assistant_message_version_id=str(row["assistant_message_version_id"]),
+            status=str(row["status"]),
+            mime_type=str(row["mime_type"]) if row["mime_type"] else None,
+            object_key=str(row["object_key"]) if row["object_key"] else None,
+            error_message=str(row["error_message"]) if row["error_message"] else None,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
 
     def get_stable_checkpoint_id(self, user_id: str, thread_id: str) -> str | None:
         """读取当前用户会话记录的稳定 checkpoint。"""
@@ -715,4 +869,3 @@ class ChatSQLiteStore:
                 """,
                 (checkpoint_id, thread_id, user_id),
             )
-

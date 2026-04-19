@@ -86,12 +86,14 @@ class ChatMetaInfo(BaseModel):
 class AssistantVersion(BaseModel):
     """助手回复的单个持久化版本。"""
 
-    id: int
+    id: str
     version_index: Literal[1, 2, 3]
     kind: Literal["original", "regenerated"]
     text: str
     meta: ChatMetaInfo | None = None
     feedback: Literal["up", "down"] | None = None
+    speech_status: Literal["generating", "ready", "failed"] | None = None
+    speech_mime_type: str | None = None
     created_at: str
 
 
@@ -111,12 +113,12 @@ class StreamErrorPayload(BaseModel):
 class PersistedChatMessage(BaseModel):
     """持久化后的聊天消息。"""
 
-    id: int
+    id: str
     role: Literal["user", "assistant"]
     text: str
     meta: ChatMetaInfo | None = None
-    reply_to_message_id: int | None = None
-    current_version_id: int | None = None
+    reply_to_message_id: str | None = None
+    current_version_id: str | None = None
     versions: list[AssistantVersion] = Field(default_factory=list)
     can_regenerate: bool = False
     created_at: str
@@ -181,10 +183,17 @@ class SessionModelProfileState(BaseModel):
 class SwitchAssistantVersionRequest(BaseModel):
     """切换 assistant 当前展示版本。"""
 
-    version_id: int = Field(gt=0)
+    version_id: str = Field(min_length=1)
 
 
 class UpdateAssistantFeedbackRequest(BaseModel):
     """更新 assistant version 点赞/点踩状态。"""
 
     feedback: Literal["up", "down"] | None = None
+
+
+class SpeechPlaybackUrlResponse(BaseModel):
+    """语音播放地址。"""
+
+    playback_url: str
+    speech_status: Literal["generating", "ready", "failed"]

@@ -168,7 +168,7 @@ describe("ChatPage", () => {
     await waitFor(() => {
       expect(screen.getByText("登录或注册")).toBeInTheDocument();
     });
-    expect(screen.getByPlaceholderText("电子邮件")).toBeInTheDocument();
+    expect(screen.getByLabelText("电子邮件")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "继续" })).toBeInTheDocument();
   });
 
@@ -476,7 +476,7 @@ describe("ChatPage", () => {
     await waitFor(() => {
       expect(screen.getByText("登录或注册")).toBeInTheDocument();
     });
-    expect(screen.getByPlaceholderText("电子邮件")).toBeInTheDocument();
+    expect(screen.getByLabelText("电子邮件")).toBeInTheDocument();
   });
 
   it("navigates to profile from drawer profile entry for authenticated users", async () => {
@@ -596,26 +596,27 @@ describe("ChatPage", () => {
             updated_at: "2026-04-08T00:00:00Z",
             messages: [
               {
-                id: 1,
+                id: "msg-1",
                 role: "user",
                 text: "今天杭州天气怎么样",
                 meta: null,
                 created_at: "2026-04-08T00:00:00Z",
               },
               {
-                id: 2,
+                id: "msg-2",
                 role: "assistant",
                 text: "杭州今天多云，气温适中。",
                 meta: { ...emptyMeta },
-                current_version_id: 21,
+                current_version_id: "ver-21",
                 versions: [
                   {
-                    id: 21,
+                    id: "ver-21",
                     version_index: 1,
                     kind: "original",
                     text: "杭州今天多云，气温适中。",
                     meta: { ...emptyMeta },
                     feedback: null,
+                    speech_status: null,
                     created_at: "2026-04-08T00:00:01Z",
                   },
                 ],
@@ -702,18 +703,18 @@ describe("ChatPage", () => {
             updated_at: "2026-04-08T00:00:00Z",
             messages: [
               {
-                id: 1,
+                id: "msg-old-user",
                 role: "user",
                 text: "旧问题",
                 meta: null,
                 created_at: "2026-04-08T00:00:00Z",
               },
               {
-                id: 2,
+                id: "msg-old-assistant",
                 role: "assistant",
                 text: "旧回答",
                 meta: { ...emptyMeta },
-                current_version_id: 1,
+                current_version_id: "ver-old-1",
                 versions: [],
                 can_regenerate: true,
                 created_at: "2026-04-08T00:00:01Z",
@@ -806,18 +807,18 @@ describe("ChatPage", () => {
             updated_at: "2026-04-08T00:00:00Z",
             messages: [
               {
-                id: 1,
+                id: "msg-old-user-2",
                 role: "user",
                 text: "旧问题",
                 meta: null,
                 created_at: "2026-04-08T00:00:00Z",
               },
               {
-                id: 2,
+                id: "msg-old-assistant-2",
                 role: "assistant",
                 text: "旧回答",
                 meta: { ...emptyMeta },
-                current_version_id: 1,
+                current_version_id: "ver-old-2",
                 versions: [],
                 can_regenerate: true,
                 created_at: "2026-04-08T00:00:01Z",
@@ -921,18 +922,18 @@ describe("ChatPage", () => {
             updated_at: "2026-04-08T00:00:00Z",
             messages: [
               {
-                id: 1,
+                id: "msg-a-user",
                 role: "user",
                 text: "问题 A",
                 meta: null,
                 created_at: "2026-04-08T00:00:00Z",
               },
               {
-                id: 2,
+                id: "msg-a-assistant",
                 role: "assistant",
                 text: "回答 A",
                 meta: { ...emptyMeta },
-                current_version_id: 1,
+                current_version_id: "ver-a-1",
                 versions: [],
                 can_regenerate: true,
                 created_at: "2026-04-08T00:00:01Z",
@@ -955,18 +956,18 @@ describe("ChatPage", () => {
             updated_at: "2026-04-08T00:10:00Z",
             messages: [
               {
-                id: 3,
+                id: "msg-b-user",
                 role: "user",
                 text: "问题 B",
                 meta: null,
                 created_at: "2026-04-08T00:10:00Z",
               },
               {
-                id: 4,
+                id: "msg-b-assistant",
                 role: "assistant",
                 text: "回答 B",
                 meta: { ...emptyMeta },
-                current_version_id: 2,
+                current_version_id: "ver-b-2",
                 versions: [],
                 can_regenerate: true,
                 created_at: "2026-04-08T00:10:01Z",
@@ -1253,26 +1254,27 @@ describe("ChatPage", () => {
             updated_at: "2026-04-05T00:00:00Z",
             messages: [
               {
-                id: 1,
+                id: "msg-regen-user",
                 role: "user",
                 text: "推荐几个余杭附近适合周末散心的景点",
                 meta: null,
                 created_at: "2026-04-05T00:00:00Z",
               },
               {
-                id: 2,
+                id: "msg-regen-assistant",
                 role: "assistant",
                 text: "旧的推荐结果",
                 meta: { ...emptyMeta },
-                current_version_id: 11,
+                current_version_id: "ver-regen-11",
                 versions: [
                   {
-                    id: 11,
+                    id: "ver-regen-11",
                     version_index: 1,
                     kind: "original",
                     text: "旧的推荐结果",
                     meta: { ...emptyMeta },
                     feedback: null,
+                    speech_status: null,
                     created_at: "2026-04-05T00:00:01Z",
                   },
                 ],
@@ -1285,7 +1287,7 @@ describe("ChatPage", () => {
         };
       }
 
-      if (url.includes("/api/sessions/t-1/messages/2/regenerate/stream") && method === "POST") {
+      if (url.includes("/api/sessions/t-1/messages/msg-regen-assistant/regenerate/stream") && method === "POST") {
         return {
           ok: true,
           status: 200,
@@ -1315,10 +1317,289 @@ describe("ChatPage", () => {
       expect(screen.getByText("旧的推荐结果")).toBeInTheDocument();
     });
 
-    await userEvent.click(screen.getByRole("button", { name: "regenerate-message-persisted-2" }));
+    await userEvent.click(screen.getByRole("button", { name: "regenerate-message-persisted-msg-regen-assistant" }));
 
     await waitFor(() => {
       expect(screen.getByText("旧的推荐结果")).toBeInTheDocument();
     });
+  });
+
+  it("requests playback url and plays assistant speech", async () => {
+    setStoredAccessToken("token-speech");
+    setStoredAuthUser({
+      id: "user-speech",
+      email: "speech@example.com",
+      nickname: "speech",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const play = vi.fn().mockResolvedValue(undefined);
+    const pause = vi.fn();
+
+    class FakeAudio {
+      src: string;
+
+      constructor(src: string) {
+        this.src = src;
+      }
+
+      play = play;
+      pause = pause;
+      addEventListener = vi.fn();
+    }
+
+    vi.stubGlobal("Audio", FakeAudio as unknown as typeof Audio);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/api/auth/me") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            id: "user-speech",
+            email: "speech@example.com",
+            nickname: "speech",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.endsWith("/api/sessions") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => [
+            {
+              thread_id: "t-1",
+              title: "语音测试",
+              created_at: "2026-04-05T00:00:00Z",
+              updated_at: "2026-04-05T00:00:00Z",
+              last_message_preview: "播报一下这段话",
+            },
+          ],
+          text: async (): Promise<string> => "[]",
+        };
+      }
+
+      if (url.includes("/api/sessions/t-1/messages/msg-speech-assistant/versions/ver-speech-11/speech/playback-url") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            playback_url: "http://localhost:8000/api/speech/play/token-ver-speech-11",
+            speech_status: "ready",
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/sessions/t-1") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            thread_id: "t-1",
+            title: "语音测试",
+            created_at: "2026-04-05T00:00:00Z",
+            updated_at: "2026-04-05T00:00:00Z",
+            messages: [
+              {
+                id: "msg-speech-user",
+                role: "user",
+                text: "播报一下这段话",
+                meta: null,
+                created_at: "2026-04-05T00:00:00Z",
+              },
+              {
+                id: "msg-speech-assistant",
+                role: "assistant",
+                text: "这是一段可以播报的回复。",
+                meta: { ...emptyMeta },
+                current_version_id: "ver-speech-11",
+                versions: [
+                  {
+                    id: "ver-speech-11",
+                    version_index: 1,
+                    kind: "original",
+                    text: "这是一段可以播报的回复。",
+                    meta: { ...emptyMeta },
+                    feedback: null,
+                    speech_status: "ready",
+                    speech_mime_type: "audio/mpeg",
+                    created_at: "2026-04-05T00:00:01Z",
+                  },
+                ],
+                can_regenerate: true,
+                created_at: "2026-04-05T00:00:01Z",
+              },
+            ],
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      return {
+        ok: false,
+        status: 404,
+        text: async (): Promise<string> => "not found",
+      };
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    renderChatPage("/chat/t-1");
+
+    await waitFor(() => {
+      expect(screen.getByText("这是一段可以播报的回复。")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "play-speech-message-persisted-msg-speech-assistant" }));
+
+    await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/sessions/t-1/messages/msg-speech-assistant/versions/ver-speech-11/speech/playback-url"),
+        expect.objectContaining({ method: "GET" }),
+      );
+      expect(play).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "stop-speech-message-persisted-msg-speech-assistant" })).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "stop-speech-message-persisted-msg-speech-assistant" }));
+    expect(pause).toHaveBeenCalled();
+  });
+
+  it("refreshes the current thread after a 409 playback conflict and hides the speech button", async () => {
+    setStoredAccessToken("token-speech-conflict");
+    setStoredAuthUser({
+      id: "user-speech-conflict",
+      email: "speech-conflict@example.com",
+      nickname: "speech-conflict",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    let sessionDetailCallCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/api/auth/me") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            id: "user-speech-conflict",
+            email: "speech-conflict@example.com",
+            nickname: "speech-conflict",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.endsWith("/api/sessions") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => [
+            {
+              thread_id: "t-1",
+              title: "语音冲突测试",
+              created_at: "2026-04-05T00:00:00Z",
+              updated_at: "2026-04-05T00:00:00Z",
+              last_message_preview: "播报按钮应该消失",
+            },
+          ],
+          text: async (): Promise<string> => "[]",
+        };
+      }
+
+      if (url.includes("/api/sessions/t-1/messages/msg-conflict-assistant/versions/ver-conflict-11/speech/playback-url") && method === "GET") {
+        return {
+          ok: false,
+          status: 409,
+          json: async (): Promise<unknown> => ({
+            detail: "Speech asset unavailable",
+          }),
+          text: async (): Promise<string> => "Speech asset unavailable",
+        };
+      }
+
+      if (url.includes("/api/sessions/t-1") && method === "GET") {
+        sessionDetailCallCount += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            thread_id: "t-1",
+            title: "语音冲突测试",
+            created_at: "2026-04-05T00:00:00Z",
+            updated_at: "2026-04-05T00:00:00Z",
+            messages: [
+              {
+                id: "msg-conflict-user",
+                role: "user",
+                text: "播报按钮应该消失",
+                meta: null,
+                created_at: "2026-04-05T00:00:00Z",
+              },
+              {
+                id: "msg-conflict-assistant",
+                role: "assistant",
+                text: "这是一段状态会失败的回复。",
+                meta: { ...emptyMeta },
+                current_version_id: "ver-conflict-11",
+                versions: [
+                  {
+                    id: "ver-conflict-11",
+                    version_index: 1,
+                    kind: "original",
+                    text: "这是一段状态会失败的回复。",
+                    meta: { ...emptyMeta },
+                    feedback: null,
+                    speech_status: sessionDetailCallCount === 1 ? "ready" : "failed",
+                    speech_mime_type: "audio/mpeg",
+                    created_at: "2026-04-05T00:00:01Z",
+                  },
+                ],
+                can_regenerate: true,
+                created_at: "2026-04-05T00:00:01Z",
+              },
+            ],
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      return {
+        ok: false,
+        status: 404,
+        text: async (): Promise<string> => "not found",
+      };
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    renderChatPage("/chat/t-1");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "play-speech-message-persisted-msg-conflict-assistant" })).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "play-speech-message-persisted-msg-conflict-assistant" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "play-speech-message-persisted-msg-conflict-assistant" })).not.toBeInTheDocument();
+    });
+
+    expect(sessionDetailCallCount).toBe(2);
   });
 });

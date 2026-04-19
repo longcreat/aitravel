@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.agent.service import TravelAgentService
@@ -18,6 +18,7 @@ from app.schemas.chat import (
     SessionDetail,
     SessionModelProfileState,
     SessionSummary,
+    SpeechPlaybackUrlResponse,
     StreamErrorPayload,
     SwitchAssistantVersionRequest,
     UpdateAssistantFeedbackRequest,
@@ -101,7 +102,7 @@ async def delete_session(
 @router.post("/{thread_id}/messages/{message_id}/regenerate/stream")
 async def regenerate_message(
     thread_id: str,
-    message_id: int,
+    message_id: str,
     service: TravelAgentService = Depends(get_agent_service),
     current_user: AuthUser = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -132,7 +133,7 @@ async def regenerate_message(
 @router.patch("/{thread_id}/messages/{message_id}/current-version", response_model=PersistedChatMessage)
 async def switch_message_version(
     thread_id: str,
-    message_id: int,
+    message_id: str,
     payload: SwitchAssistantVersionRequest,
     service: TravelAgentService = Depends(get_agent_service),
     current_user: AuthUser = Depends(get_current_user),
@@ -150,8 +151,8 @@ async def switch_message_version(
 )
 async def update_message_feedback(
     thread_id: str,
-    message_id: int,
-    version_id: int,
+    message_id: str,
+    version_id: str,
     payload: UpdateAssistantFeedbackRequest,
     service: TravelAgentService = Depends(get_agent_service),
     current_user: AuthUser = Depends(get_current_user),
@@ -163,3 +164,32 @@ async def update_message_feedback(
     if message is None:
         raise HTTPException(status_code=404, detail="Assistant version not found")
     return message
+
+
+@router.get(
+    "/{thread_id}/messages/{message_id}/versions/{version_id}/speech/playback-url",
+    response_model=SpeechPlaybackUrlResponse,
+)
+async def get_message_speech_playback_url(
+    thread_id: str,
+    message_id: str,
+    version_id: str,
+    request: Request,
+    service: TravelAgentService = Depends(get_agent_service),
+    current_user: AuthUser = Depends(get_current_user),
+) -> SpeechPlaybackUrlResponse:
+    """返回 assistant version 的语音播放地址。"""
+    try:
+        playback_url, speech_status = service.get_speech_playback_url(
+            current_user.id,
+            thread_id,
+            message_id,
+            version_id,
+            base_url=str(request.base_url).rstrip("/"),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return SpeechPlaybackUrlResponse(playback_url=playback_url, speech_status=speech_status)

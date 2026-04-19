@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import re
 import secrets
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,6 +22,7 @@ from app.auth.store import AuthSQLiteStore
 from app.schemas.auth import AuthPurpose, AuthTokenPayload, AuthUser, SendCodeResponse
 
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_LOGGER = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -85,6 +88,33 @@ class AuthService:
         if self._smtp_settings is None:
             return False
         return self._smtp_settings.use_tls and self._smtp_settings.port in {465, 994}
+
+    def _smtp_mode(self) -> str:
+        if self._should_use_smtp_ssl():
+            return "ssl"
+        if self._smtp_settings is not None and self._smtp_settings.use_tls:
+            return "starttls"
+        return "plain"
+
+    def _raise_smtp_failure(self, exc: Exception) -> None:
+        assert self._smtp_settings is not None
+        _LOGGER.exception(
+            "SMTP send failed host=%s port=%s mode=%s",
+            self._smtp_settings.host,
+            self._smtp_settings.port,
+            self._smtp_mode(),
+        )
+        if isinstance(exc, socket.gaierror):
+            detail = "SMTP 域名解析失败，请检查 SMTP_HOST 和本机 DNS 配置"
+        elif isinstance(exc, smtplib.SMTPAuthenticationError):
+            detail = "SMTP 认证失败，请检查 SMTP_USERNAME 与 SMTP_PASSWORD，部分邮箱需要客户端授权码"
+        elif isinstance(exc, smtplib.SMTPServerDisconnected):
+            detail = "SMTP 连接被服务端断开，请检查 SMTP_HOST、SMTP_PORT 与 SSL/TLS 模式是否匹配"
+        elif isinstance(exc, (socket.timeout, TimeoutError)):
+            detail = "SMTP 连接超时，请检查网络、防火墙和 SMTP 端口策略"
+        else:
+            detail = "SMTP 发送失败，请检查 SMTP 配置和当前网络状态"
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
     def _normalize_email(self, email: str) -> str:
         normalized = email.strip().lower()
@@ -197,20 +227,23 @@ class AuthService:
             charset="utf-8",
         )
 
-        # 企业邮箱常见的 SSL 端口可能是 465 或 994，这两种都需要直接走 SMTP_SSL。
-        if self._should_use_smtp_ssl():
-            with smtplib.SMTP_SSL(self._smtp_settings.host, self._smtp_settings.port, timeout=20) as smtp:
+        try:
+            # 企业邮箱常见的 SSL 端口可能是 465 或 994，这两种都需要直接走 SMTP_SSL。
+            if self._should_use_smtp_ssl():
+                with smtplib.SMTP_SSL(self._smtp_settings.host, self._smtp_settings.port, timeout=20) as smtp:
+                    smtp.login(self._smtp_settings.username, self._smtp_settings.password)
+                    smtp.send_message(message)
+                return
+
+            with smtplib.SMTP(self._smtp_settings.host, self._smtp_settings.port, timeout=20) as smtp:
+                smtp.ehlo()
+                if self._smtp_settings.use_tls:
+                    smtp.starttls()
+                    smtp.ehlo()
                 smtp.login(self._smtp_settings.username, self._smtp_settings.password)
                 smtp.send_message(message)
-            return
-
-        with smtplib.SMTP(self._smtp_settings.host, self._smtp_settings.port, timeout=20) as smtp:
-            smtp.ehlo()
-            if self._smtp_settings.use_tls:
-                smtp.starttls()
-                smtp.ehlo()
-            smtp.login(self._smtp_settings.username, self._smtp_settings.password)
-            smtp.send_message(message)
+        except (OSError, smtplib.SMTPException) as exc:
+            self._raise_smtp_failure(exc)
 
     def send_code(self, *, email: str, purpose: AuthPurpose) -> SendCodeResponse:
         normalized_email = self._normalize_email(email)

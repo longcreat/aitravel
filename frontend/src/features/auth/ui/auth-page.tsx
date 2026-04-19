@@ -6,7 +6,7 @@ import { sendAuthCode, verifyAuthCode } from "@/features/auth/api/auth.api";
 import { useAuth } from "@/features/auth/model/auth.context";
 import type { AuthPurpose } from "@/features/auth/model/auth.types";
 import { MobileShell } from "@/shared/layouts/mobile-shell";
-import { Button, ConfirmDialog, Input, PageBackButton } from "@/shared/ui";
+import { Button, ConfirmDialog, FlatingInput, PageBackButton } from "@/shared/ui";
 
 type AuthStep = "email" | "code";
 
@@ -129,12 +129,14 @@ export function AuthPage() {
           <div className="mt-10 space-y-4">
             {step === "email" ? (
               <>
-                <Input
+                <FlatingInput
                   type="email"
+                  label="电子邮件"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  placeholder="电子邮件"
                   className="h-16 rounded-[22px] border-border bg-white px-6 text-[16px] shadow-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+                  labelPositionerClassName="left-5"
+                  labelClassName="bg-white"
                 />
 
                 {error ? <p className="px-1 text-sm text-[#b8503b]">{error}</p> : null}
@@ -151,19 +153,14 @@ export function AuthPage() {
               </>
             ) : (
               <>
-                <div className="px-1">
-                  <div className="relative">
-                    <span className="absolute left-5 top-0 z-10 -translate-y-1/2 rounded-sm bg-white px-1.5 text-[13px] font-medium leading-none text-ink">
-                      验证码
-                    </span>
-                    <Input
-                      value={code}
-                      onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                      placeholder=""
-                      className="h-16 rounded-[12px] border-black/[0.08] bg-white px-4 text-[18px] tracking-[0.08em] text-ink shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
-                    />
-                  </div>
-                </div>
+                <FlatingInput
+                  value={code}
+                  label="验证码"
+                  onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                  className="h-16 rounded-[22px] border-border bg-white px-6 text-[18px] tracking-[0.08em] text-ink shadow-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+                  labelPositionerClassName="left-5"
+                  labelClassName="bg-white"
+                />
 
                 {error ? <p className="px-1 text-sm text-[#b8503b]">{error}</p> : null}
 

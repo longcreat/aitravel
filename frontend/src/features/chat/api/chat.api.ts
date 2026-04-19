@@ -6,6 +6,7 @@ import type {
   SessionDetail,
   SessionModelProfileState,
   SessionSummary,
+  SpeechPlaybackUrlResponse,
   SwitchAssistantVersionRequest,
   UpdateSessionModelProfileRequest,
   UpdateAssistantFeedbackRequest,
@@ -148,10 +149,14 @@ async function streamSse(path: string, payload: unknown, options: StreamChatOpti
 
 export async function regenerateAssistantMessage(
   threadId: string,
-  messageId: number,
+  messageId: string,
   options: StreamChatOptions,
 ): Promise<void> {
-  return streamSse(`/api/sessions/${encodeURIComponent(threadId)}/messages/${messageId}/regenerate/stream`, undefined, options);
+  return streamSse(
+    `/api/sessions/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/regenerate/stream`,
+    undefined,
+    options,
+  );
 }
 
 export async function listSessions(): Promise<SessionSummary[]> {
@@ -182,23 +187,33 @@ export async function updateSessionModelProfile(
 
 export async function switchAssistantVersion(
   threadId: string,
-  messageId: number,
+  messageId: string,
   payload: SwitchAssistantVersionRequest,
 ): Promise<PersistedChatMessage> {
   return http.patch<PersistedChatMessage>(
-    `/api/sessions/${encodeURIComponent(threadId)}/messages/${messageId}/current-version`,
+    `/api/sessions/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/current-version`,
     payload,
   );
 }
 
 export async function updateAssistantFeedback(
   threadId: string,
-  messageId: number,
-  versionId: number,
+  messageId: string,
+  versionId: string,
   payload: UpdateAssistantFeedbackRequest,
 ): Promise<PersistedChatMessage> {
   return http.patch<PersistedChatMessage>(
-    `/api/sessions/${encodeURIComponent(threadId)}/messages/${messageId}/versions/${versionId}/feedback`,
+    `/api/sessions/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/versions/${encodeURIComponent(versionId)}/feedback`,
     payload,
+  );
+}
+
+export async function getAssistantSpeechPlaybackUrl(
+  threadId: string,
+  messageId: string,
+  versionId: string,
+): Promise<SpeechPlaybackUrlResponse> {
+  return http.get<SpeechPlaybackUrlResponse>(
+    `/api/sessions/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/versions/${encodeURIComponent(versionId)}/speech/playback-url`,
   );
 }

@@ -26,6 +26,7 @@ from app.schemas.chat import (
     SessionModelProfileState,
     SessionSummary,
 )
+from app.speech.service import SpeechPlaybackTarget, SpeechService
 
 
 class TravelAgentService:
@@ -39,6 +40,7 @@ class TravelAgentService:
             runtime_service=self._runtime_service,
         )
         self._stream_service = AgentStreamService(runtime_service=self._runtime_service)
+        self._speech_service = SpeechService(chat_store=self._chat_store, sqlite_db_path=sqlite_db_path)
 
     async def startup(self) -> None:
         """初始化 Agent 运行时。"""
@@ -46,6 +48,7 @@ class TravelAgentService:
 
     async def shutdown(self) -> None:
         """关闭运行时关联的资源。"""
+        await self._speech_service.shutdown()
         await self._runtime_service.shutdown()
 
     def runtime_snapshot(self) -> dict[str, Any]:
@@ -99,16 +102,38 @@ class TravelAgentService:
         return deleted
 
     def switch_assistant_version(
-        self, user_id: str, thread_id: str, assistant_message_id: int, version_id: int
+        self, user_id: str, thread_id: str, assistant_message_id: str, version_id: str
     ) -> PersistedChatMessage | None:
         """切换 assistant 当前展示版本。"""
         return self._chat_store.switch_assistant_version(user_id, thread_id, assistant_message_id, version_id)
 
     def update_assistant_feedback(
-        self, user_id: str, thread_id: str, assistant_message_id: int, version_id: int, feedback: str | None
+        self, user_id: str, thread_id: str, assistant_message_id: str, version_id: str, feedback: str | None
     ) -> PersistedChatMessage | None:
         """更新 assistant version 点赞/点踩状态。"""
         return self._chat_store.update_assistant_feedback(user_id, thread_id, assistant_message_id, version_id, feedback)
+
+    def get_speech_playback_url(
+        self,
+        user_id: str,
+        thread_id: str,
+        assistant_message_id: str,
+        version_id: str,
+        *,
+        base_url: str,
+    ) -> tuple[str, str]:
+        """返回 assistant version 的语音播放地址。"""
+        return self._speech_service.build_playback_url(
+            user_id=user_id,
+            thread_id=thread_id,
+            assistant_message_id=assistant_message_id,
+            version_id=version_id,
+            base_url=base_url,
+        )
+
+    def get_speech_playback_target(self, token: str) -> SpeechPlaybackTarget:
+        """解析播放 token 并返回对应音频流。"""
+        return self._speech_service.get_playback_target(token)
 
     def _resolve_thread_model_profile_key(
         self, user_id: str, thread_id: str, requested_profile_key: str | None = None
@@ -119,7 +144,7 @@ class TravelAgentService:
             return coerce_llm_profile_key(stored_profile_key)
         return resolve_llm_profile_key(requested_profile_key)
 
-    async def stream_regenerate(self, user_id: str, thread_id: str, assistant_message_id: int):
+    async def stream_regenerate(self, user_id: str, thread_id: str, assistant_message_id: str):
         """重新生成最新一条 assistant 回复。"""
         if self._runtime_service.runtime is None:
             await self.startup()
@@ -131,6 +156,7 @@ class TravelAgentService:
 
         state = StreamRunState()
         deferred_values_event: tuple[str, dict[str, Any]] | None = None
+        speech_job_id = self._speech_service.start_generation(user_id, thread_id)
 
         with langsmith_trace_context(
             "chat.regenerate",
@@ -151,12 +177,14 @@ class TravelAgentService:
                         thread_id=thread_id,
                         model_profile_key=model_profile_key,
                     ),
+                    on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
                 ):
                     if event_name == "values":
                         deferred_values_event = (event_name, event_payload)
                         continue
                     yield event_name, event_payload
             except BaseException:
+                self._speech_service.cancel_generation(speech_job_id)
                 await self.rollback_thread(user_id, thread_id)
                 raise
 
@@ -167,15 +195,30 @@ class TravelAgentService:
             runtime=self._runtime_service.require_runtime(),
         )
         result_checkpoint_id = await self._checkpoint_service.find_latest_valid_checkpoint_id(thread_id)
-        self._chat_store.upsert_regenerated_version(
-            user_id,
-            thread_id,
-            assistant_message_id,
-            text=final_response.assistant_message,
-            meta=final_response.meta.model_dump(),
-            parent_checkpoint_id=target.original_parent_checkpoint_id,
-            result_checkpoint_id=result_checkpoint_id,
-        )
+        try:
+            version_id = self._chat_store.upsert_regenerated_version(
+                user_id,
+                thread_id,
+                assistant_message_id,
+                text=final_response.assistant_message,
+                meta=final_response.meta.model_dump(),
+                parent_checkpoint_id=target.original_parent_checkpoint_id,
+                result_checkpoint_id=result_checkpoint_id,
+            )
+            if version_id is not None:
+                self._speech_service.bind_generation(
+                    speech_job_id,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    assistant_message_id=assistant_message_id,
+                    version_id=version_id,
+                )
+                self._speech_service.finish_generation(speech_job_id, final_response.assistant_message)
+            else:
+                self._speech_service.cancel_generation(speech_job_id)
+        except Exception:
+            self._speech_service.cancel_generation(speech_job_id)
+            raise
         self._chat_store.set_stable_checkpoint_id(user_id, thread_id, result_checkpoint_id)
         if deferred_values_event is not None:
             yield deferred_values_event
@@ -196,6 +239,7 @@ class TravelAgentService:
         )
         checkpoint_id = await self._checkpoint_service.get_effective_checkpoint_id(user_id, request.thread_id)
         state = StreamRunState()
+        speech_job_id = self._speech_service.start_generation(user_id, request.thread_id)
 
         with langsmith_trace_context(
             "chat.stream",
@@ -219,9 +263,11 @@ class TravelAgentService:
                         model_profile_key=model_profile_key,
                         session_meta=request.session_meta,
                     ),
+                    on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
                 ):
                     yield event_name, event_payload
             except BaseException:
+                self._speech_service.cancel_generation(speech_job_id)
                 await self.rollback_thread(user_id, request.thread_id)
                 raise
 
@@ -234,15 +280,27 @@ class TravelAgentService:
         result_checkpoint_id = await self._checkpoint_service.find_latest_valid_checkpoint_id(request.thread_id)
         stored_parent_checkpoint_id = checkpoint_id or self._chat_store.get_thread_root_checkpoint_id(request.thread_id)
 
-        self._chat_store.append_assistant_message(
-            user_id,
-            request.thread_id,
-            final_response.assistant_message,
-            meta=final_response.meta.model_dump(),
-            reply_to_message_id=user_message_id,
-            parent_checkpoint_id=stored_parent_checkpoint_id,
-            result_checkpoint_id=result_checkpoint_id,
-        )
+        try:
+            assistant_message_id, version_id = self._chat_store.append_assistant_message(
+                user_id,
+                request.thread_id,
+                final_response.assistant_message,
+                meta=final_response.meta.model_dump(),
+                reply_to_message_id=user_message_id,
+                parent_checkpoint_id=stored_parent_checkpoint_id,
+                result_checkpoint_id=result_checkpoint_id,
+            )
+            self._speech_service.bind_generation(
+                speech_job_id,
+                user_id=user_id,
+                thread_id=request.thread_id,
+                assistant_message_id=assistant_message_id,
+                version_id=version_id,
+            )
+            self._speech_service.finish_generation(speech_job_id, final_response.assistant_message)
+        except Exception:
+            self._speech_service.cancel_generation(speech_job_id)
+            raise
         self._chat_store.set_stable_checkpoint_id(user_id, request.thread_id, result_checkpoint_id)
 
     async def rollback_thread(self, user_id: str, thread_id: str) -> None:

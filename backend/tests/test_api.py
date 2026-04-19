@@ -18,12 +18,17 @@ from app.schemas.chat import (
     SessionModelProfileState,
     SessionSummary,
 )
+from app.speech.service import SpeechPlaybackTarget
+
+
+async def _fake_audio_stream():
+    yield b"fake-mp3-bytes"
 
 
 class _FakeService:
     def __init__(self) -> None:
         self.feedback: str | None = None
-        self.current_version_id = 1
+        self.current_version_id = "ver-original-1"
         self.model_profile_key = "standard"
 
     async def startup(self) -> None:
@@ -174,15 +179,15 @@ class _FakeService:
             model_profile_key=self.model_profile_key,
             messages=[
                 PersistedChatMessage(
-                    id=1,
+                    id="msg-user-1",
                     role="user",
                     text="帮我做一个3天杭州行程",
                     created_at="2026-04-05T00:00:00Z",
                 ),
                 PersistedChatMessage(
-                    id=2,
+                    id="msg-assistant-1",
                     role="assistant",
-                    text="这是一个测试回复" if self.current_version_id == 1 else "这是重生成后的回复",
+                    text="这是一个测试回复" if self.current_version_id == "ver-original-1" else "这是重生成后的回复",
                     meta=ChatMetaInfo(
                         tool_traces=[],
                         mcp_connected_servers=[],
@@ -191,7 +196,7 @@ class _FakeService:
                     current_version_id=self.current_version_id,
                     versions=[
                         AssistantVersion(
-                            id=1,
+                            id="ver-original-1",
                             version_index=1,
                             kind="original",
                             text="这是一个测试回复",
@@ -201,10 +206,12 @@ class _FakeService:
                                 mcp_errors=[],
                             ),
                             feedback=None,
+                            speech_status="ready",
+                            speech_mime_type="audio/mpeg",
                             created_at="2026-04-05T00:00:01Z",
                         ),
                         AssistantVersion(
-                            id=2,
+                            id="ver-regenerated-1",
                             version_index=2,
                             kind="regenerated",
                             text="这是重生成后的回复",
@@ -214,6 +221,8 @@ class _FakeService:
                                 mcp_errors=[],
                             ),
                             feedback=self.feedback,  # type: ignore[arg-type]
+                            speech_status="generating",
+                            speech_mime_type="audio/mpeg",
                             created_at="2026-04-05T00:00:02Z",
                         ),
                     ],
@@ -245,9 +254,9 @@ class _FakeService:
         self.model_profile_key = model_profile_key
         return SessionModelProfileState(thread_id=thread_id, model_profile_key=model_profile_key)
 
-    async def stream_regenerate(self, _user_id: str, thread_id: str, message_id: int):
+    async def stream_regenerate(self, _user_id: str, thread_id: str, message_id: str):
         assert thread_id == "t-1"
-        assert message_id == 2
+        assert message_id == "msg-assistant-1"
         yield "messages", {
             "type": "messages",
             "ns": [],
@@ -294,21 +303,40 @@ class _FakeService:
             },
         }
 
-    def switch_assistant_version(self, _user_id: str, thread_id: str, message_id: int, version_id: int):
-        if thread_id != "t-1" or message_id != 2 or version_id not in (1, 2):
+    def switch_assistant_version(self, _user_id: str, thread_id: str, message_id: str, version_id: str):
+        if thread_id != "t-1" or message_id != "msg-assistant-1" or version_id not in {"ver-original-1", "ver-regenerated-1"}:
             return None
         self.current_version_id = version_id
         detail = self.get_session_detail(_user_id, thread_id)
         assert detail is not None
         return detail.messages[1]
 
-    def update_assistant_feedback(self, _user_id: str, thread_id: str, message_id: int, version_id: int, feedback: str | None):
-        if thread_id != "t-1" or message_id != 2 or version_id not in (1, 2):
+    def update_assistant_feedback(self, _user_id: str, thread_id: str, message_id: str, version_id: str, feedback: str | None):
+        if thread_id != "t-1" or message_id != "msg-assistant-1" or version_id not in {"ver-original-1", "ver-regenerated-1"}:
             return None
         self.feedback = feedback
         detail = self.get_session_detail(_user_id, thread_id)
         assert detail is not None
         return detail.messages[1]
+
+    def get_speech_playback_url(
+        self,
+        _user_id: str,
+        thread_id: str,
+        message_id: str,
+        version_id: str,
+        *,
+        base_url: str,
+    ) -> tuple[str, str]:
+        if thread_id != "t-1" or message_id != "msg-assistant-1" or version_id not in {"ver-original-1", "ver-regenerated-1"}:
+            raise FileNotFoundError("Speech asset not found")
+        status = "ready" if version_id == "ver-original-1" else "generating"
+        return f"{base_url}/api/speech/play/token-{version_id}", status
+
+    def get_speech_playback_target(self, token: str) -> SpeechPlaybackTarget:
+        if token not in {"token-ver-original-1", "token-ver-regenerated-1"}:
+            raise ValueError("Invalid speech playback token")
+        return SpeechPlaybackTarget(media_type="audio/mpeg", iterator=_fake_audio_stream())
 
 
 def _parse_sse(body: str) -> list[tuple[str, dict]]:
@@ -379,6 +407,7 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
         assert detail_res.json()["model_profile_key"] == "standard"
         assert detail_res.json()["messages"][0]["role"] == "user"
         assert detail_res.json()["messages"][1]["versions"][0]["kind"] == "original"
+        assert detail_res.json()["messages"][1]["versions"][0]["speech_status"] == "ready"
 
         missing_detail = client.get("/api/sessions/not-exist")
         assert missing_detail.status_code == 404
@@ -394,21 +423,36 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
         assert profile_update_res.status_code == 200
         assert profile_update_res.json()["model_profile_key"] == "thinking"
 
-        regenerate_res = client.post("/api/sessions/t-1/messages/2/regenerate/stream")
+        regenerate_res = client.post("/api/sessions/t-1/messages/msg-assistant-1/regenerate/stream")
         assert regenerate_res.status_code == 200
         regenerate_events = _parse_sse(regenerate_res.text)
         assert [event[0] for event in regenerate_events] == ["messages", "values"]
 
-        switch_version_res = client.patch("/api/sessions/t-1/messages/2/current-version", json={"version_id": 2})
+        switch_version_res = client.patch(
+            "/api/sessions/t-1/messages/msg-assistant-1/current-version",
+            json={"version_id": "ver-regenerated-1"},
+        )
         assert switch_version_res.status_code == 200
-        assert switch_version_res.json()["current_version_id"] == 2
+        assert switch_version_res.json()["current_version_id"] == "ver-regenerated-1"
 
         feedback_res = client.patch(
-            "/api/sessions/t-1/messages/2/versions/2/feedback",
+            "/api/sessions/t-1/messages/msg-assistant-1/versions/ver-regenerated-1/feedback",
             json={"feedback": "up"},
         )
         assert feedback_res.status_code == 200
         assert feedback_res.json()["versions"][1]["feedback"] == "up"
+
+        speech_url_res = client.get(
+            "/api/sessions/t-1/messages/msg-assistant-1/versions/ver-regenerated-1/speech/playback-url"
+        )
+        assert speech_url_res.status_code == 200
+        assert speech_url_res.json()["speech_status"] == "generating"
+        assert speech_url_res.json()["playback_url"].endswith("/api/speech/play/token-ver-regenerated-1")
+
+        speech_play_res = client.get("/api/speech/play/token-ver-regenerated-1")
+        assert speech_play_res.status_code == 200
+        assert speech_play_res.headers["content-type"].startswith("audio/mpeg")
+        assert speech_play_res.content == b"fake-mp3-bytes"
 
         missing_rename = client.patch("/api/sessions/not-exist", json={"title": "x"})
         assert missing_rename.status_code == 404
@@ -426,6 +470,9 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
         missing_delete = client.delete("/api/sessions/not-exist")
         assert missing_delete.status_code == 404
 
+        invalid_speech_play = client.get("/api/speech/play/not-valid")
+        assert invalid_speech_play.status_code == 401
+
     app.dependency_overrides.clear()
 
 
@@ -435,9 +482,9 @@ def test_regenerate_stream_returns_business_error_when_limit_reached(
     monkeypatch.setenv("CHAT_SQLITE_PATH", str(tmp_path / "chat.db"))
 
     class _LimitFakeService(_FakeService):
-        async def stream_regenerate(self, _user_id: str, thread_id: str, message_id: int):
+        async def stream_regenerate(self, _user_id: str, thread_id: str, message_id: str):
             assert thread_id == "t-1"
-            assert message_id == 2
+            assert message_id == "msg-assistant-1"
             if False:
                 yield "messages", {}
             raise ValueError("最多生成三次无法重新生成")
@@ -455,7 +502,7 @@ def test_regenerate_stream_returns_business_error_when_limit_reached(
     )
 
     with TestClient(app) as client:
-        regenerate_res = client.post("/api/sessions/t-1/messages/2/regenerate/stream")
+        regenerate_res = client.post("/api/sessions/t-1/messages/msg-assistant-1/regenerate/stream")
         assert regenerate_res.status_code == 200
         regenerate_events = _parse_sse(regenerate_res.text)
         assert regenerate_events == [("error", {"message": "最多生成三次无法重新生成"})]

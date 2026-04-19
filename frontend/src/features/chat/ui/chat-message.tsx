@@ -9,7 +9,9 @@ import {
   ChevronRight,
   Copy,
   LoaderCircle,
+  Play,
   RefreshCcw,
+  Square,
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
@@ -24,9 +26,11 @@ import { AppSurfaceSheet } from "@/shared/ui";
 
 interface ChatMessageProps {
   message: ChatMessageItem;
-  onRegenerate?: (messageId: number) => Promise<void> | void;
-  onSwitchVersion?: (messageId: number, versionId: number) => Promise<void> | void;
-  onFeedback?: (messageId: number, versionId: number, feedback: "up" | "down" | null) => Promise<void> | void;
+  onRegenerate?: (messageId: string) => Promise<void> | void;
+  onSwitchVersion?: (messageId: string, versionId: string) => Promise<void> | void;
+  onFeedback?: (messageId: string, versionId: string, feedback: "up" | "down" | null) => Promise<void> | void;
+  onToggleSpeech?: (messageId: string, versionId: string) => Promise<void> | void;
+  isSpeechPlaying?: boolean;
 }
 
 const MAX_ASSISTANT_VERSIONS = 3;
@@ -160,7 +164,14 @@ function ReasoningPanel({
   );
 }
 
-export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback }: ChatMessageProps) {
+export function ChatMessage({
+  message,
+  onRegenerate,
+  onSwitchVersion,
+  onFeedback,
+  onToggleSpeech,
+  isSpeechPlaying = false,
+}: ChatMessageProps) {
   const isUser = message.role === "user";
   const reasoningText = !isUser ? message.meta?.reasoning_text?.trim() ?? "" : "";
   const reasoningState = !isUser ? message.meta?.reasoning_state ?? (reasoningText ? "completed" : null) : null;
@@ -168,7 +179,9 @@ export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback
   const [copied, setCopied] = useState(false);
   const [activeStepGroupId, setActiveStepGroupId] = useState<string | null>(null);
   const copiedTimeoutRef = useRef<number | null>(null);
-  const persistedMessageId = message.id.startsWith("persisted-") ? Number(message.id.slice("persisted-".length)) : null;
+  const persistedMessageId = message.id.startsWith("persisted-")
+    ? message.id.slice("persisted-".length)
+    : null;
   const versions = message.versions ?? [];
   const currentVersion =
     versions.find((item) => item.id === message.current_version_id) ??
@@ -178,6 +191,10 @@ export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback
   const canShowCopy = !isUser && Boolean(message.text) && message.status !== "streaming";
   const canShowPersistedActions = canShowCopy && persistedMessageId != null;
   const canShowFeedback = canShowPersistedActions && currentVersion != null;
+  const canShowSpeech =
+    canShowPersistedActions &&
+    currentVersion != null &&
+    (currentVersion.speech_status === "generating" || currentVersion.speech_status === "ready");
   const canShowRegenerate = canShowFeedback && Boolean(message.can_regenerate);
   const regenerateLimitReached = versions.length >= MAX_ASSISTANT_VERSIONS;
   const canRegenerate = canShowRegenerate && !regenerateLimitReached;
@@ -211,7 +228,7 @@ export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback
   }
 
   async function handleFeedback(nextFeedback: "up" | "down") {
-    if (!persistedMessageId || !currentVersion || !onFeedback) {
+    if (persistedMessageId == null || !currentVersion || !onFeedback) {
       return;
     }
     await onFeedback(
@@ -308,6 +325,17 @@ export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
             </button>
 
+            {canShowSpeech ? (
+              <button
+                type="button"
+                aria-label={`${isSpeechPlaying ? "stop" : "play"}-speech-message-${message.id}`}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[#6f8589] transition-colors hover:bg-[#eef4f4] hover:text-[#47686d]"
+                onClick={() => persistedMessageId != null && currentVersion && void onToggleSpeech?.(persistedMessageId, currentVersion.id)}
+              >
+                {isSpeechPlaying ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              </button>
+            ) : null}
+
             {canShowRegenerate ? (
               <span title={regenerateLimitReached ? REGENERATE_LIMIT_MESSAGE : undefined}>
                 <button
@@ -320,7 +348,7 @@ export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback
                       ? "cursor-not-allowed bg-[#f6f6f3] text-[#b7b4ad]"
                       : "text-[#6f8589] hover:bg-[#eef4f4] hover:text-[#47686d]",
                   )}
-                  onClick={() => persistedMessageId && onRegenerate?.(persistedMessageId)}
+                  onClick={() => persistedMessageId != null && onRegenerate?.(persistedMessageId)}
                 >
                   <RefreshCcw className="h-4 w-4" />
                 </button>
@@ -366,7 +394,7 @@ export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback
                   aria-label={`previous-version-${message.id}`}
                   className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[#6f8589] transition-colors hover:bg-[#eef4f4] hover:text-[#47686d]"
                   onClick={() => {
-                    if (!persistedMessageId || !currentVersion || !onSwitchVersion) {
+                    if (persistedMessageId == null || !currentVersion || !onSwitchVersion) {
                       return;
                     }
                     const currentIndex = versions.findIndex((item) => item.id === currentVersion.id);
@@ -384,7 +412,7 @@ export function ChatMessage({ message, onRegenerate, onSwitchVersion, onFeedback
                   aria-label={`next-version-${message.id}`}
                   className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[#6f8589] transition-colors hover:bg-[#eef4f4] hover:text-[#47686d]"
                   onClick={() => {
-                    if (!persistedMessageId || !currentVersion || !onSwitchVersion) {
+                    if (persistedMessageId == null || !currentVersion || !onSwitchVersion) {
                       return;
                     }
                     const currentIndex = versions.findIndex((item) => item.id === currentVersion.id);

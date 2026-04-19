@@ -39,14 +39,17 @@ export interface ChatMetaInfo {
 }
 
 export type AssistantVersionFeedback = "up" | "down" | null;
+export type AssistantVersionSpeechStatus = "generating" | "ready" | "failed" | null;
 
 export interface AssistantMessageVersion {
-  id: number;
+  id: string;
   version_index: 1 | 2 | 3;
   kind: "original" | "regenerated";
   text: string;
   meta: ChatMetaInfo | null;
   feedback: AssistantVersionFeedback;
+  speech_status: AssistantVersionSpeechStatus;
+  speech_mime_type?: string | null;
   created_at: string;
 }
 
@@ -115,18 +118,18 @@ export interface ChatMessageItem {
   text: string;
   status?: "streaming" | "stopped";
   meta?: ChatMetaInfo;
-  current_version_id?: number | null;
+  current_version_id?: string | null;
   versions?: AssistantMessageVersion[];
   can_regenerate?: boolean;
 }
 
 export interface PersistedChatMessage {
-  id: number;
+  id: string;
   role: ChatRole;
   text: string;
   meta: ChatMetaInfo | null;
-  reply_to_message_id?: number | null;
-  current_version_id?: number | null;
+  reply_to_message_id?: string | null;
+  current_version_id?: string | null;
   versions?: AssistantMessageVersion[];
   can_regenerate?: boolean;
   created_at: string;
@@ -173,11 +176,16 @@ export interface SessionModelProfileState {
 }
 
 export interface SwitchAssistantVersionRequest {
-  version_id: number;
+  version_id: string;
 }
 
 export interface UpdateAssistantFeedbackRequest {
   feedback: AssistantVersionFeedback;
+}
+
+export interface SpeechPlaybackUrlResponse {
+  playback_url: string;
+  speech_status: Exclude<AssistantVersionSpeechStatus, "failed" | null>;
 }
 
 export type SendIntentResult =

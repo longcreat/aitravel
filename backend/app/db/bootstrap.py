@@ -113,10 +113,45 @@ def _guard_unversioned_app_database(conn: sqlite3.Connection) -> None:
         "chat_sessions",
         "chat_messages",
         "assistant_message_versions",
+        "assistant_version_speech_assets",
     }
     if existing & app_tables:
         raise RuntimeError(
             "检测到未版本化的历史 chat.db。请先设置 DEV_RESET_CHAT_DB=true 重建数据库，"
+            "或手动删除旧数据库后重新启动。"
+        )
+
+
+def _table_has_integer_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    for row in rows:
+        if str(row["name"]) != column_name:
+            continue
+        return str(row["type"]).strip().upper() == "INTEGER"
+    return False
+
+
+def _guard_legacy_integer_chat_schema(conn: sqlite3.Connection) -> None:
+    """拒绝继续运行旧的整数型聊天 schema。"""
+    existing = _existing_tables(conn)
+    legacy_checks = (
+        ("chat_messages", "id"),
+        ("chat_messages", "reply_to_message_id"),
+        ("chat_messages", "current_version_id"),
+        ("assistant_message_versions", "id"),
+        ("assistant_message_versions", "assistant_message_id"),
+        ("assistant_version_speech_assets", "id"),
+        ("assistant_version_speech_assets", "assistant_message_version_id"),
+    )
+    if not any(table_name in existing for table_name, _ in legacy_checks):
+        return
+
+    if any(
+        table_name in existing and _table_has_integer_column(conn, table_name, column_name)
+        for table_name, column_name in legacy_checks
+    ):
+        raise RuntimeError(
+            "检测到旧版整数型聊天 schema。请先设置 DEV_RESET_CHAT_DB=true 重建数据库，"
             "或手动删除旧数据库后重新启动。"
         )
 
@@ -145,6 +180,7 @@ def run_sqlite_migrations(db_path: Path, *, target_version: int | None = None) -
     with _connection(db_path) as conn:
         _guard_unversioned_app_database(conn)
         _ensure_schema_migrations_table(conn)
+        _guard_legacy_integer_chat_schema(conn)
         existing_versions = {
             int(row["version"])
             for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version ASC").fetchall()

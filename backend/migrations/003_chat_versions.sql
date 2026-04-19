@@ -8,11 +8,11 @@ ALTER TABLE chat_sessions
 ADD COLUMN stable_checkpoint_id TEXT;
 
 ALTER TABLE chat_messages
-ADD COLUMN current_version_id INTEGER;
+ADD COLUMN current_version_id TEXT;
 
 CREATE TABLE assistant_message_versions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  assistant_message_id INTEGER NOT NULL,
+  id TEXT PRIMARY KEY,
+  assistant_message_id TEXT NOT NULL,
   version_index INTEGER NOT NULL CHECK (version_index BETWEEN 1 AND 3),
   kind TEXT NOT NULL CHECK (kind IN ('original', 'regenerated')),
   text TEXT NOT NULL,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage, message_to_dict
 from pydantic import BaseModel
@@ -42,6 +42,7 @@ class AgentStreamService:
         model_profile_key: str,
         state: StreamRunState,
         agent_context: AgentRequestContext,
+        on_assistant_text_chunk: Callable[[str], None] | None = None,
     ):
         """执行一次底层 Agent 流并累积结果。"""
         runtime = self._runtime_service.require_runtime()
@@ -73,6 +74,10 @@ class AgentStreamService:
                         state.accumulated_chunk = message_chunk
                     else:
                         state.accumulated_chunk = state.accumulated_chunk + message_chunk
+                    if on_assistant_text_chunk is not None:
+                        chunk_text = _content_to_text(message_chunk.content)
+                        if chunk_text.strip():
+                            on_assistant_text_chunk(chunk_text)
 
             if part_type == "updates":
                 for _, _, trace in _extract_tool_events(

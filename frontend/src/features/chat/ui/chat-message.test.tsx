@@ -74,31 +74,35 @@ describe("ChatMessage", () => {
     const onRegenerate = vi.fn();
     const onSwitchVersion = vi.fn();
     const onFeedback = vi.fn();
+    const onToggleSpeech = vi.fn();
 
     const message: ChatMessageItem = {
-      id: "persisted-42",
+      id: "persisted-msg-42",
       role: "assistant",
       text: "这是重生后的最终回复。",
-      current_version_id: 1002,
+      current_version_id: "ver-1002",
       can_regenerate: true,
       meta: { ...emptyMeta },
       versions: [
         {
-          id: 1001,
+          id: "ver-1001",
           version_index: 1,
           kind: "original",
           text: "这是原始版本。",
           meta: null,
           feedback: null,
+          speech_status: null,
           created_at: "2026-04-07T00:00:00+08:00",
         },
         {
-          id: 1002,
+          id: "ver-1002",
           version_index: 2,
           kind: "regenerated",
           text: "这是重生后的最终回复。",
           meta: null,
           feedback: "up",
+          speech_status: "ready",
+          speech_mime_type: "audio/mpeg",
           created_at: "2026-04-07T00:01:00+08:00",
         },
       ],
@@ -110,68 +114,76 @@ describe("ChatMessage", () => {
         onRegenerate={onRegenerate}
         onSwitchVersion={onSwitchVersion}
         onFeedback={onFeedback}
+        onToggleSpeech={onToggleSpeech}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "copy-message-persisted-42" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "regenerate-message-persisted-42" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "thumbs-up-message-persisted-42" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "thumbs-down-message-persisted-42" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "previous-version-persisted-42" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "next-version-persisted-42" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "copy-message-persisted-msg-42" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "play-speech-message-persisted-msg-42" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "regenerate-message-persisted-msg-42" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "thumbs-up-message-persisted-msg-42" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "thumbs-down-message-persisted-msg-42" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "previous-version-persisted-msg-42" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "next-version-persisted-msg-42" })).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
     expect(screen.queryByText("复制")).not.toBeInTheDocument();
     expect(screen.queryByText("重新生成")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "regenerate-message-persisted-42" }));
-    expect(onRegenerate).toHaveBeenCalledWith(42);
+    await userEvent.click(screen.getByRole("button", { name: "regenerate-message-persisted-msg-42" }));
+    expect(onRegenerate).toHaveBeenCalledWith("msg-42");
 
-    await userEvent.click(screen.getByRole("button", { name: "previous-version-persisted-42" }));
-    expect(onSwitchVersion).toHaveBeenCalledWith(42, 1001);
+    await userEvent.click(screen.getByRole("button", { name: "previous-version-persisted-msg-42" }));
+    expect(onSwitchVersion).toHaveBeenCalledWith("msg-42", "ver-1001");
 
-    await userEvent.click(screen.getByRole("button", { name: "thumbs-up-message-persisted-42" }));
-    expect(onFeedback).toHaveBeenCalledWith(42, 1002, null);
+    await userEvent.click(screen.getByRole("button", { name: "play-speech-message-persisted-msg-42" }));
+    expect(onToggleSpeech).toHaveBeenCalledWith("msg-42", "ver-1002");
 
-    await userEvent.click(screen.getByRole("button", { name: "thumbs-down-message-persisted-42" }));
-    expect(onFeedback).toHaveBeenCalledWith(42, 1002, "down");
+    await userEvent.click(screen.getByRole("button", { name: "thumbs-up-message-persisted-msg-42" }));
+    expect(onFeedback).toHaveBeenCalledWith("msg-42", "ver-1002", null);
+
+    await userEvent.click(screen.getByRole("button", { name: "thumbs-down-message-persisted-msg-42" }));
+    expect(onFeedback).toHaveBeenCalledWith("msg-42", "ver-1002", "down");
   });
 
   it("disables regenerate after reaching the 3-version limit and shows the limit hint", async () => {
     const onRegenerate = vi.fn();
 
     const message: ChatMessageItem = {
-      id: "persisted-88",
+      id: "persisted-msg-88",
       role: "assistant",
       text: "这是第三个版本。",
-      current_version_id: 2003,
+      current_version_id: "ver-2003",
       can_regenerate: true,
       meta: { ...emptyMeta },
       versions: [
         {
-          id: 2001,
+          id: "ver-2001",
           version_index: 1,
           kind: "original",
           text: "这是原始版本。",
           meta: null,
           feedback: null,
+          speech_status: null,
           created_at: "2026-04-07T00:00:00+08:00",
         },
         {
-          id: 2002,
+          id: "ver-2002",
           version_index: 2,
           kind: "regenerated",
           text: "这是第二个版本。",
           meta: null,
           feedback: null,
+          speech_status: null,
           created_at: "2026-04-07T00:01:00+08:00",
         },
         {
-          id: 2003,
+          id: "ver-2003",
           version_index: 3,
           kind: "regenerated",
           text: "这是第三个版本。",
           meta: null,
           feedback: null,
+          speech_status: null,
           created_at: "2026-04-07T00:02:00+08:00",
         },
       ],
@@ -179,7 +191,7 @@ describe("ChatMessage", () => {
 
     renderWithOverlayRoot(<ChatMessage message={message} onRegenerate={onRegenerate} />);
 
-    const regenerateButton = screen.getByRole("button", { name: "regenerate-message-persisted-88" });
+    const regenerateButton = screen.getByRole("button", { name: "regenerate-message-persisted-msg-88" });
     expect(regenerateButton).toBeDisabled();
     expect(regenerateButton.closest("span")).toHaveAttribute("title", "最多生成三次无法重新生成");
     expect(screen.getByText("3/3")).toBeInTheDocument();
@@ -302,5 +314,32 @@ describe("ChatMessage", () => {
     expect(screen.getByText("已完成")).toBeInTheDocument();
     expect(screen.getByText("先拆解问题，再整理答复。")).toBeInTheDocument();
     expect(screen.getByText("这是最终答复。")).toBeInTheDocument();
+  });
+
+  it("shows stop icon when current speech is playing", () => {
+    const message: ChatMessageItem = {
+      id: "persisted-msg-77",
+      role: "assistant",
+      text: "正在播放的回复。",
+      current_version_id: "ver-301",
+      meta: { ...emptyMeta },
+      versions: [
+        {
+          id: "ver-301",
+          version_index: 1,
+          kind: "original",
+          text: "正在播放的回复。",
+          meta: null,
+          feedback: null,
+          speech_status: "generating",
+          speech_mime_type: "audio/mpeg",
+          created_at: "2026-04-07T00:00:00+08:00",
+        },
+      ],
+    };
+
+    renderWithOverlayRoot(<ChatMessage message={message} isSpeechPlaying={true} />);
+
+    expect(screen.getByRole("button", { name: "stop-speech-message-persisted-msg-77" })).toBeInTheDocument();
   });
 });

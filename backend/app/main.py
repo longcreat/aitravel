@@ -14,6 +14,7 @@ from app.api.deps import get_agent_service
 from app.db.bootstrap import bootstrap_sqlite_database
 from app.api.health import router as health_router
 from app.api.sessions import router as sessions_router
+from app.api.speech import router as speech_router
 
 
 @asynccontextmanager
@@ -42,5 +43,6 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(chat_router)
     app.include_router(sessions_router)
+    app.include_router(speech_router)
 
     return app
