@@ -131,6 +131,17 @@ class SpeechService:
         for job in jobs:
             self.cancel_generation(job.id)
 
+    async def delete_thread_assets(self, thread_id: str) -> None:
+        """删除会话关联的所有对象存储文件。"""
+        object_keys = self._chat_store.get_thread_speech_object_keys(thread_id)
+        if object_keys:
+            await self._object_store.delete_files(object_keys)
+
+    async def delete_assets_by_keys(self, object_keys: list[str]) -> None:
+        """按预取的 object_key 列表删除对象存储文件（用于 DB 删除前已收集 key 的场景）。"""
+        if object_keys:
+            await self._object_store.delete_files(object_keys)
+
     def start_generation(self, user_id: str, thread_id: str) -> str | None:
         """启动流式语音生成任务。"""
         if not self.enabled:

@@ -8,6 +8,7 @@ interface ChatComposerProps {
   loading: boolean;
   ready: boolean;
   modelProfileLabel: string;
+  placeholder?: string;
   onSend: (message: string) => Promise<SendIntentResult>;
   onOpenModelProfileSheet: () => void;
   onStop: () => void;
@@ -17,6 +18,7 @@ export function ChatComposer({
   loading,
   ready,
   modelProfileLabel,
+  placeholder = "发消息或按住说话",
   onSend,
   onOpenModelProfileSheet,
   onStop,
@@ -70,7 +72,7 @@ export function ChatComposer({
               ref={textareaRef}
               value={value}
               onChange={(event) => setValue(event.target.value)}
-              placeholder="发消息或按住说话"
+              placeholder={placeholder}
               rows={1}
               style={{ height: "24px" }}
               className="flex-1 max-h-32 resize-none border-none bg-transparent py-0 text-base leading-6 text-ink outline-none focus:ring-0 overflow-y-hidden scrollbar-hidden"

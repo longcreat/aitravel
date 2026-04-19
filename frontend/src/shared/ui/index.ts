@@ -4,5 +4,6 @@
 export * from "./primitives";
 export * from "./app-surface-sheet";
 export * from "./confirm-dialog";
+export * from "./in-app-browser-sheet";
 export * from "./page-back-button";
 export * from "./settings";

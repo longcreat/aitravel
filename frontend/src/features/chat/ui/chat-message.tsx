@@ -21,6 +21,7 @@ import remarkGfm from "remark-gfm";
 
 import { getToolDisplayName } from "@/features/chat/model/tool-display-name";
 import type { ChatMessageItem } from "@/features/chat/model/chat.types";
+import { useBrowser } from "@/shared/lib/browser";
 import { cn } from "@/shared/lib/cn";
 import { AppSurfaceSheet } from "@/shared/ui";
 
@@ -30,6 +31,7 @@ interface ChatMessageProps {
   onSwitchVersion?: (messageId: string, versionId: string) => Promise<void> | void;
   onFeedback?: (messageId: string, versionId: string, feedback: "up" | "down" | null) => Promise<void> | void;
   onToggleSpeech?: (messageId: string, versionId: string) => Promise<void> | void;
+  onSelectClarificationReply?: (messageId: string, reply: string) => Promise<void> | void;
   isSpeechPlaying?: boolean;
 }
 
@@ -64,6 +66,8 @@ function MarkdownBubble({
   content: string;
   isUser: boolean;
 }) {
+  const { openUrl } = useBrowser();
+
   return (
     <div className="max-w-none break-words text-base leading-[1.8] tracking-[0.01em] [line-break:auto] [text-wrap:pretty] [&_*]:break-words">
       <ReactMarkdown
@@ -89,9 +93,13 @@ function MarkdownBubble({
           a: ({ href, children }) => (
             <a
               href={href}
-              target="_blank"
-              rel="noreferrer"
               className={cn("font-medium underline underline-offset-2", isUser ? "text-[#0c5577]" : "text-[#177199]")}
+              onClick={(e) => {
+                if (href && /^https?:\/\//i.test(href)) {
+                  e.preventDefault();
+                  openUrl(href);
+                }
+              }}
             >
               {children}
             </a>
@@ -170,14 +178,17 @@ export function ChatMessage({
   onSwitchVersion,
   onFeedback,
   onToggleSpeech,
+  onSelectClarificationReply,
   isSpeechPlaying = false,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
+  const clarification = !isUser ? message.interrupt ?? null : null;
   const reasoningText = !isUser ? message.meta?.reasoning_text?.trim() ?? "" : "";
   const reasoningState = !isUser ? message.meta?.reasoning_state ?? (reasoningText ? "completed" : null) : null;
-  const shouldShowTypingOnly = !isUser && !message.text && !reasoningText;
+  const shouldShowTypingOnly = !isUser && !message.text && !reasoningText && clarification == null;
   const [copied, setCopied] = useState(false);
   const [activeStepGroupId, setActiveStepGroupId] = useState<string | null>(null);
+  const [activeStepItemId, setActiveStepItemId] = useState<string | null>(null);
   const copiedTimeoutRef = useRef<number | null>(null);
   const persistedMessageId = message.id.startsWith("persisted-")
     ? message.id.slice("persisted-".length)
@@ -188,7 +199,7 @@ export function ChatMessage({
     versions[versions.length - 1] ??
     null;
   const currentFeedback = currentVersion?.feedback ?? null;
-  const canShowCopy = !isUser && Boolean(message.text) && message.status !== "streaming";
+  const canShowCopy = !isUser && clarification == null && Boolean(message.text) && message.status !== "streaming";
   const canShowPersistedActions = canShowCopy && persistedMessageId != null;
   const canShowFeedback = canShowPersistedActions && currentVersion != null;
   const canShowSpeech =
@@ -201,7 +212,31 @@ export function ChatMessage({
   const canSwitchVersions = canRegenerate && versions.length > 1;
   const renderSegments = !isUser ? message.meta?.render_segments ?? [] : [];
   const stepGroups = !isUser ? message.meta?.step_groups ?? [] : [];
+  const toolTraces = !isUser ? message.meta?.tool_traces ?? [] : [];
   const activeStepGroup = stepGroups.find((group) => group.id === activeStepGroupId) ?? null;
+  const activeStepItem = activeStepGroup?.items.find((item) => item.id === activeStepItemId) ?? null;
+
+  function getTracesForItem(toolCallId: string) {
+    const called = toolTraces.find((t) => t.phase === "called" && t.tool_call_id === toolCallId);
+    const returned = toolTraces.find((t) => t.phase === "returned" && t.tool_call_id === toolCallId);
+    return { called, returned };
+  }
+
+  function formatPayload(payload: unknown): string {
+    if (payload === null || payload === undefined) return "(空)";
+    if (typeof payload === "string") {
+      try {
+        return JSON.stringify(JSON.parse(payload), null, 2);
+      } catch {
+        return payload;
+      }
+    }
+    try {
+      return JSON.stringify(payload, null, 2);
+    } catch {
+      return String(payload);
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -238,7 +273,42 @@ export function ChatMessage({
     );
   }
 
+  function renderClarificationCard() {
+    if (clarification == null) {
+      return null;
+    }
+
+    return (
+      <div className="space-y-4">
+        <div className="text-[16px] leading-8 text-[#2c2b28]">{clarification.question}</div>
+        {clarification.suggested_replies.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {clarification.suggested_replies.map((reply) => (
+              <button
+                key={`${message.id}-${reply}`}
+                type="button"
+                data-testid={`clarification-reply-${message.id}-${reply}`}
+                className="rounded-full border border-[#e8ded0] bg-[#f8f3ea] px-3 py-1.5 text-[13px] font-medium text-[#6f6557] transition-colors hover:bg-[#f1eadf]"
+                onClick={() => void onSelectClarificationReply?.(message.id, reply)}
+              >
+                {reply}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {clarification.allow_custom_input ? (
+          <div className="text-[13px] leading-6 text-[#8b8174]">
+            也可以直接在下方输入框补充信息，我会继续帮你完成这次请求。
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderAssistantBody() {
+    if (clarification != null) {
+      return renderClarificationCard();
+    }
     if (!renderSegments.length) {
       if (message.text) {
         return <MarkdownBubble content={message.text} isUser={false} />;
@@ -430,28 +500,80 @@ export function ChatMessage({
         {!isUser && activeStepGroup ? (
           <AppSurfaceSheet
             open={true}
-            onClose={() => setActiveStepGroupId(null)}
-            title="Summary"
+            onClose={() => {
+              setActiveStepGroupId(null);
+              setActiveStepItemId(null);
+            }}
+            title={
+              activeStepItem ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label="back-to-summary"
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[#7a766d] hover:bg-[#f0ece4]"
+                    onClick={() => setActiveStepItemId(null)}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <span>{getToolDisplayName(activeStepItem.tool_name)}</span>
+                </div>
+              ) : "Summary"
+            }
             closeLabel="close-step-summary"
           >
-            <div className="space-y-4">
-              {activeStepGroup.items.map((item) => (
-                <div key={item.id} className="flex items-start gap-3 rounded-[12px] bg-[#faf8f3] px-3 py-3">
-                  <div className="mt-0.5 text-[#8a857b]">
-                    {item.status === "running" ? (
-                      <LoaderCircle className="h-4 w-4 animate-spin" />
-                    ) : item.status === "error" ? (
-                      <AlertTriangle className="h-4 w-4 text-[#bf5f4b]" />
-                    ) : (
-                      <CheckCircle2 className="h-4 w-4 text-[#6d8a6f]" />
-                    )}
+            <div className="max-h-[60vh] overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+            {activeStepItem ? (() => {
+              const { called, returned } = getTracesForItem(activeStepItem.id);
+              return (
+                <div className="space-y-4">
+                  <div className="rounded-[12px] bg-[#faf8f3] px-3 py-3">
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8a857b]">入参</div>
+                    <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[13px] leading-6 text-[#2c2b28] font-mono">
+                      {called ? formatPayload(called.payload) : "(无入参记录)"}
+                    </pre>
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[16px] font-medium text-[#2c2b28]">{getToolDisplayName(item.tool_name)}</div>
-                    <div className="mt-1 text-[14px] leading-6 text-[#7a766d]">{item.summary}</div>
+                  <div className="rounded-[12px] bg-[#faf8f3] px-3 py-3">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8a857b]">返回结果</span>
+                      {returned?.result_status === "error" ? (
+                        <span className="rounded-full bg-[#fdecea] px-2 py-0.5 text-[11px] font-semibold text-[#bf5f4b]">错误</span>
+                      ) : returned ? (
+                        <span className="rounded-full bg-[#edf7f4] px-2 py-0.5 text-[11px] font-semibold text-[#6d8a6f]">成功</span>
+                      ) : null}
+                    </div>
+                    <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[13px] leading-6 text-[#2c2b28] font-mono">
+                      {returned ? formatPayload(returned.payload) : activeStepItem.status === "running" ? "(执行中…)" : "(无返回记录)"}
+                    </pre>
                   </div>
                 </div>
-              ))}
+              );
+            })() : (
+              <div className="space-y-3">
+                {activeStepGroup.items.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="flex w-full items-start gap-3 rounded-[12px] bg-[#faf8f3] px-3 py-3 text-left transition-colors hover:bg-[#f0ece4]"
+                    onClick={() => setActiveStepItemId(item.id)}
+                  >
+                    <div className="mt-0.5 shrink-0 text-[#8a857b]">
+                      {item.status === "running" ? (
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                      ) : item.status === "error" ? (
+                        <AlertTriangle className="h-4 w-4 text-[#bf5f4b]" />
+                      ) : (
+                        <CheckCircle2 className="h-4 w-4 text-[#6d8a6f]" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[16px] font-medium text-[#2c2b28]">{getToolDisplayName(item.tool_name)}</div>
+                      <div className="mt-1 text-[14px] leading-6 text-[#7a766d]">{item.summary}</div>
+                    </div>
+                    <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-[#b5b0a8]" />
+                  </button>
+                ))}
+              </div>
+            )}
             </div>
           </AppSurfaceSheet>
         ) : null}

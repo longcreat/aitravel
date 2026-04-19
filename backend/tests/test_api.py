@@ -47,6 +47,7 @@ class _FakeService:
         }
 
     async def stream_invoke(self, _user_id, _payload):
+        self.resume_request_payload = None
         yield "messages", {
             "type": "messages",
             "ns": [],
@@ -149,6 +150,17 @@ class _FakeService:
                     {"type": "ai", "data": {"content": "这是一个测试回复", "additional_kwargs": {}, "response_metadata": {}, "type": "ai", "name": None, "id": None, "tool_calls": [], "invalid_tool_calls": [], "usage_metadata": None}}
                 ],
             },
+        }
+
+    async def stream_resume(self, _user_id, payload):
+        self.resume_request_payload = payload
+        yield "interrupt", {
+            "kind": "clarification",
+            "interrupt_id": payload.interrupt_id,
+            "question": "请问你想查哪个城市的天气？",
+            "missing_field": "city",
+            "suggested_replies": ["杭州", "上海"],
+            "allow_custom_input": True,
         }
 
     def list_model_profiles(self) -> list[ChatModelProfile]:
@@ -392,6 +404,32 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
         assert events[0][1]["data"][0]["data"]["content"] == "这是"
         assert events[2][1]["data"][0]["data"]["content"] == "一个测试回复"
         assert events[4][1]["data"]["messages"][0]["data"]["content"] == "这是一个测试回复"
+
+        resume_response = client.post(
+            "/api/chat/resume/stream",
+            json={
+                "thread_id": "t-1",
+                "interrupt_id": "interrupt-city",
+                "answer": "杭州",
+                "locale": "zh-CN",
+                "session_meta": {},
+            },
+        )
+        assert resume_response.status_code == 200
+        resume_events = _parse_sse(resume_response.text)
+        assert resume_events == [
+            (
+                "interrupt",
+                {
+                    "kind": "clarification",
+                    "interrupt_id": "interrupt-city",
+                    "question": "请问你想查哪个城市的天气？",
+                    "missing_field": "city",
+                    "suggested_replies": ["杭州", "上海"],
+                    "allow_custom_input": True,
+                },
+            )
+        ]
 
         list_res = client.get("/api/sessions")
         assert list_res.status_code == 200

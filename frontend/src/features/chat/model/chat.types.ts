@@ -61,6 +61,24 @@ export interface ChatInvokeRequest {
   session_meta: Record<string, unknown>;
 }
 
+export interface ChatResumeRequest {
+  thread_id: string;
+  interrupt_id: string;
+  answer: string;
+  locale: string;
+  model_profile_key?: string | null;
+  session_meta: Record<string, unknown>;
+}
+
+export interface ChatInterruptPayload {
+  kind: "clarification";
+  interrupt_id: string;
+  question: string;
+  missing_field?: string | null;
+  suggested_replies: string[];
+  allow_custom_input: boolean;
+}
+
 export interface ChatFinalPayload {
   assistant_message: string;
   meta: ChatMetaInfo;
@@ -104,6 +122,10 @@ export type ChatStreamEvent =
       data: LangGraphStreamPart;
     }
   | {
+      event: "interrupt";
+      data: ChatInterruptPayload;
+    }
+  | {
       event: "error";
       data: {
         message: string;
@@ -117,6 +139,7 @@ export interface ChatMessageItem {
   role: ChatRole;
   text: string;
   status?: "streaming" | "stopped";
+  interrupt?: ChatInterruptPayload;
   meta?: ChatMetaInfo;
   current_version_id?: string | null;
   versions?: AssistantMessageVersion[];

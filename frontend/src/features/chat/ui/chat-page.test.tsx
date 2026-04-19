@@ -338,6 +338,175 @@ describe("ChatPage", () => {
     expect(getCurrentLocationNameMock).not.toHaveBeenCalled();
   });
 
+  it("renders clarification interrupt and resumes the same run after selecting a quick reply", async () => {
+    setStoredAccessToken("token-hitl");
+    setStoredAuthUser({
+      id: "user-hitl",
+      email: "hitl@example.com",
+      nickname: "hitl",
+      created_at: "2026-04-08T00:00:00Z",
+      updated_at: "2026-04-08T00:00:00Z",
+    });
+
+    const interruptStream = createSseStream([
+      'event: interrupt\ndata: {"kind":"clarification","interrupt_id":"interrupt-city","question":"请问你想查哪个城市的天气？","missing_field":"city","suggested_replies":["杭州","上海"],"allow_custom_input":true}\n\n',
+    ]);
+    const resumeStream = createSseStream([
+      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"human","data":{"content":"最近天气怎么样，适合出去玩吗？","additional_kwargs":{},"response_metadata":{},"type":"human","name":null,"id":null}},{"type":"ai","data":{"content":"杭州这几天温度适中，适合安排轻松出游。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
+    ]);
+
+    let resumeCalled = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/api/auth/me") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            id: "user-hitl",
+            email: "hitl@example.com",
+            nickname: "hitl",
+            created_at: "2026-04-08T00:00:00Z",
+            updated_at: "2026-04-08T00:00:00Z",
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/chat/model-profiles") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => modelProfilesResponse,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.endsWith("/api/sessions") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> =>
+            resumeCalled
+              ? [
+                  {
+                    thread_id: "thread-test-1",
+                    title: "最近天气怎么样...",
+                    created_at: "2026-04-08T00:00:00Z",
+                    updated_at: "2026-04-08T00:00:00Z",
+                    last_message_preview: "杭州这几天温度适中，适合安排轻松出游。",
+                  },
+                ]
+              : [],
+          text: async (): Promise<string> => "[]",
+        };
+      }
+
+      if (url.includes("/api/chat/stream") && method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          body: interruptStream,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/chat/resume/stream") && method === "POST") {
+        resumeCalled = true;
+        return {
+          ok: true,
+          status: 200,
+          body: resumeStream,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/sessions/thread-test-1") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            thread_id: "thread-test-1",
+            title: "最近天气怎么样...",
+            created_at: "2026-04-08T00:00:00Z",
+            updated_at: "2026-04-08T00:00:00Z",
+            model_profile_key: "standard",
+            messages: [
+              {
+                id: "msg-hitl-user",
+                role: "user",
+                text: "最近天气怎么样，适合出去玩吗？",
+                meta: null,
+                created_at: "2026-04-08T00:00:00Z",
+              },
+              {
+                id: "msg-hitl-assistant",
+                role: "assistant",
+                text: "杭州这几天温度适中，适合安排轻松出游。",
+                meta: { ...emptyMeta },
+                current_version_id: "ver-hitl-1",
+                versions: [
+                  {
+                    id: "ver-hitl-1",
+                    version_index: 1,
+                    kind: "original",
+                    text: "杭州这几天温度适中，适合安排轻松出游。",
+                    meta: { ...emptyMeta },
+                    feedback: null,
+                    speech_status: null,
+                    created_at: "2026-04-08T00:00:01Z",
+                  },
+                ],
+                can_regenerate: true,
+                created_at: "2026-04-08T00:00:01Z",
+              },
+            ],
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      return {
+        ok: false,
+        status: 404,
+        text: async (): Promise<string> => "not found",
+      };
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    renderChatPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "new-session" })).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText("发消息或按住说话");
+    await userEvent.type(input, "最近天气怎么样，适合出去玩吗？");
+    await userEvent.click(screen.getByRole("button", { name: "send-message" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("请问你想查哪个城市的天气？")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "杭州" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/chat/resume/stream"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"answer":"杭州"'),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("杭州这几天温度适中，适合安排轻松出游。")).toBeInTheDocument();
+    });
+  });
+
   it("sends the selected model profile with a new thread message", async () => {
     setStoredAccessToken("token-model");
     setStoredAuthUser({

@@ -16,6 +16,9 @@ class SpeechObjectStore(Protocol):
     async def iter_file(self, object_key: str, chunk_size: int = 65536) -> AsyncIterator[bytes]:
         ...
 
+    async def delete_files(self, object_keys: list[str]) -> None:
+        ...
+
 
 class LocalSpeechObjectStore:
     """本地磁盘对象存储。"""
@@ -45,6 +48,17 @@ class LocalSpeechObjectStore:
                 yield chunk
         finally:
             file_handle.close()
+
+    async def delete_files(self, object_keys: list[str]) -> None:
+        def _delete() -> None:
+            for key in object_keys:
+                target = self._root / key
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        await asyncio.to_thread(_delete)
 
 
 class R2SpeechObjectStore:
@@ -93,6 +107,16 @@ class R2SpeechObjectStore:
                 yield chunk
         finally:
             await asyncio.to_thread(body.close)
+
+    async def delete_files(self, object_keys: list[str]) -> None:
+        if not object_keys:
+            return
+        objects = [{"Key": key} for key in object_keys]
+        await asyncio.to_thread(
+            self._client.delete_objects,
+            Bucket=self._bucket,
+            Delete={"Objects": objects, "Quiet": True},
+        )
 
 
 def build_speech_object_store(root: Path) -> SpeechObjectStore:

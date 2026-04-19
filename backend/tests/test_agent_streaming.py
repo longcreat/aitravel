@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 from langchain_core.messages import AIMessageChunk
+from langgraph.types import Interrupt
 
 from app.agent.context import AgentRequestContext
-from app.agent.streaming import AgentStreamService, StreamRunState, _serialize_stream_part
+from app.agent.streaming import AgentStreamService, StreamRunState, _extract_interrupt_payload, _serialize_stream_part
 
 
 class _WhitespaceChunkAgent:
@@ -59,7 +60,7 @@ async def test_stream_agent_run_preserves_whitespace_for_tts_chunks(
 
     async for _event_name, _payload in service.stream_agent_run(
         thread_id="thread-tts",
-        user_message="帮我读一下",
+        agent_input={"messages": ["ignored"]},
         checkpoint_id=None,
         model_profile_key="standard",
         state=state,
@@ -75,3 +76,30 @@ async def test_stream_agent_run_preserves_whitespace_for_tts_chunks(
         pass
 
     assert "".join(captured_chunks) == "你好 世界"
+
+
+def test_extract_interrupt_payload_normalizes_langgraph_interrupts() -> None:
+    payload = _extract_interrupt_payload(
+        {
+            "type": "values",
+            "data": {},
+            "interrupts": (
+                Interrupt(
+                    value={
+                        "kind": "clarification",
+                        "question": "请问你想去哪座城市？",
+                        "missing_field": "destination_city",
+                        "suggested_replies": ["杭州", "上海"],
+                        "allow_custom_input": True,
+                    },
+                    id="interrupt-1",
+                ),
+            ),
+        }
+    )
+
+    assert payload is not None
+    assert payload.interrupt_id == "interrupt-1"
+    assert payload.question == "请问你想去哪座城市？"
+    assert payload.missing_field == "destination_city"
+    assert payload.suggested_replies == ["杭州", "上海"]

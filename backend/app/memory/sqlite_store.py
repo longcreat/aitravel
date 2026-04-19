@@ -842,6 +842,21 @@ class ChatSQLiteStore:
             updated_at=str(row["updated_at"]),
         )
 
+    def get_thread_speech_object_keys(self, thread_id: str) -> list[str]:
+        """返回会话下所有已上传语音文件的 object key 列表。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.object_key
+                FROM assistant_version_speech_assets a
+                INNER JOIN assistant_message_versions v ON v.id = a.assistant_message_version_id
+                INNER JOIN chat_messages m ON m.id = v.assistant_message_id
+                WHERE m.thread_id = ? AND a.object_key IS NOT NULL
+                """,
+                (thread_id,),
+            ).fetchall()
+        return [str(row["object_key"]) for row in rows]
+
     def get_stable_checkpoint_id(self, user_id: str, thread_id: str) -> str | None:
         """读取当前用户会话记录的稳定 checkpoint。"""
         with self._connection() as conn:

@@ -8,6 +8,7 @@ from typing import Any
 from langchain.agents.middleware import dynamic_prompt, wrap_tool_call
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphInterrupt
 
 from app.agent.context import AgentRequestContext
 from app.prompt.system import TRAVEL_SYSTEM_PROMPT
@@ -55,9 +56,15 @@ def travel_dynamic_prompt(request: ModelRequest[AgentRequestContext]) -> str:
 
 @wrap_tool_call
 async def tool_error_boundary(request, handler):
-    """统一把工具异常转换成标准 ToolMessage。"""
+    """统一把工具异常转换成标准 ToolMessage。
+
+    注意：GraphInterrupt（由 interrupt() 抛出）必须透传给 LangGraph，
+    不能在此处被捕获——否则 human-in-the-loop 的 interrupt 机制将完全失效。
+    """
     try:
         return await handler(request)
+    except GraphInterrupt:
+        raise  # 让 LangGraph 的 checkpoint / interrupt 机制正常接管
     except Exception as exc:  # pragma: no cover - exercised via agent runtime
         tool_name = request.tool.name if request.tool is not None else str(request.tool_call.get("name") or "unknown")
         tool_call_id = str(request.tool_call.get("id") or f"{tool_name}-error")

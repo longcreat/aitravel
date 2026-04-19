@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-_ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
 
 
 class StdioConnection(BaseModel):

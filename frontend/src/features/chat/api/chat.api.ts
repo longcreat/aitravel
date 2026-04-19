@@ -1,5 +1,6 @@
 import type {
   ChatInvokeRequest,
+  ChatResumeRequest,
   ChatStreamEvent,
   ListChatModelProfilesResponse,
   PersistedChatMessage,
@@ -30,7 +31,7 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-const knownEventNames: StreamEventName[] = ["messages", "updates", "values", "error"];
+const knownEventNames: StreamEventName[] = ["messages", "updates", "values", "interrupt", "error"];
 
 function isKnownEventName(name: string): name is StreamEventName {
   return knownEventNames.includes(name as StreamEventName);
@@ -74,6 +75,10 @@ function toStreamEvent(eventName: string, rawData: string): ChatStreamEvent | nu
 
 export async function streamChat(payload: ChatInvokeRequest, options: StreamChatOptions): Promise<void> {
   return streamSse("/api/chat/stream", payload, options);
+}
+
+export async function streamChatResume(payload: ChatResumeRequest, options: StreamChatOptions): Promise<void> {
+  return streamSse("/api/chat/resume/stream", payload, options);
 }
 
 export async function listChatModelProfiles(): Promise<ListChatModelProfilesResponse> {

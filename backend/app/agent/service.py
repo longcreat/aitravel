@@ -5,9 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import HumanMessage
+from langgraph.types import Command
+
 from app.agent.checkpoints import AgentCheckpointService
 from app.agent.context import AgentRequestContext
-from app.agent.presentation import build_final_response
+from app.agent.presentation import build_final_response, extract_latest_human_message_text
 from app.agent.runtime import AgentRuntimeService
 from app.agent.streaming import AgentStreamService, StreamRunState
 from app.llm.provider import (
@@ -21,6 +24,7 @@ from app.observability.langsmith import langsmith_trace_context
 from app.schemas.chat import (
     ChatInvokeRequest,
     ChatModelProfile,
+    ChatResumeRequest,
     PersistedChatMessage,
     SessionDetail,
     SessionModelProfileState,
@@ -95,10 +99,13 @@ class TravelAgentService:
         return self._chat_store.rename_session(user_id, thread_id, title)
 
     async def delete_session(self, user_id: str, thread_id: str) -> bool:
-        """删除会话及其 checkpoint。"""
+        """删除会话及其 checkpoint，并联级删除对象存储中的语音文件。"""
+        # 必须在删除 DB 记录之前收集 object_keys，否则 CASCADE 会先删除 speech_assets 行，导致查询返回空列表
+        speech_object_keys = self._chat_store.get_thread_speech_object_keys(thread_id)
         deleted = self._chat_store.delete_session(user_id, thread_id)
         if deleted:
             await self._checkpoint_service.delete_thread(thread_id)
+            await self._speech_service.delete_assets_by_keys(speech_object_keys)
         return deleted
 
     def switch_assistant_version(
@@ -144,6 +151,43 @@ class TravelAgentService:
             return coerce_llm_profile_key(stored_profile_key)
         return resolve_llm_profile_key(requested_profile_key)
 
+    def _persist_completed_turn(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        user_message_text: str,
+        model_profile_key: str,
+        final_response,
+        result_checkpoint_id: str | None,
+        stored_parent_checkpoint_id: str | None,
+        speech_job_id: str,
+    ) -> None:
+        """在一次完整对话结束后持久化用户消息与助手回复。"""
+        user_message_id = self._chat_store.append_user_message(
+            user_id,
+            thread_id,
+            user_message_text,
+            model_profile_key=model_profile_key,
+        )
+        assistant_message_id, version_id = self._chat_store.append_assistant_message(
+            user_id,
+            thread_id,
+            final_response.assistant_message,
+            meta=final_response.meta.model_dump(),
+            reply_to_message_id=user_message_id,
+            parent_checkpoint_id=stored_parent_checkpoint_id,
+            result_checkpoint_id=result_checkpoint_id,
+        )
+        self._speech_service.bind_generation(
+            speech_job_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            assistant_message_id=assistant_message_id,
+            version_id=version_id,
+        )
+        self._speech_service.finish_generation(speech_job_id, final_response.assistant_message)
+
     async def stream_regenerate(self, user_id: str, thread_id: str, assistant_message_id: str):
         """重新生成最新一条 assistant 回复。"""
         if self._runtime_service.runtime is None:
@@ -168,7 +212,7 @@ class TravelAgentService:
             try:
                 async for event_name, event_payload in self._stream_service.stream_agent_run(
                     thread_id=thread_id,
-                    user_message=target.user_message_text,
+                    agent_input={"messages": [HumanMessage(content=target.user_message_text)]},
                     checkpoint_id=target.original_parent_checkpoint_id,
                     model_profile_key=model_profile_key,
                     state=state,
@@ -179,6 +223,8 @@ class TravelAgentService:
                     ),
                     on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
                 ):
+                    if event_name == "interrupt":
+                        raise ValueError("当前回复重新生成需要补充信息，请改为发送新消息")
                     if event_name == "values":
                         deferred_values_event = (event_name, event_payload)
                         continue
@@ -231,12 +277,6 @@ class TravelAgentService:
         model_profile_key = self._resolve_thread_model_profile_key(
             user_id, request.thread_id, request.model_profile_key
         )
-        user_message_id = self._chat_store.append_user_message(
-            user_id,
-            request.thread_id,
-            request.user_message,
-            model_profile_key=model_profile_key,
-        )
         checkpoint_id = await self._checkpoint_service.get_effective_checkpoint_id(user_id, request.thread_id)
         state = StreamRunState()
         speech_job_id = self._speech_service.start_generation(user_id, request.thread_id)
@@ -252,7 +292,7 @@ class TravelAgentService:
             try:
                 async for event_name, event_payload in self._stream_service.stream_agent_run(
                     thread_id=request.thread_id,
-                    user_message=request.user_message,
+                    agent_input={"messages": [HumanMessage(content=request.user_message)]},
                     checkpoint_id=checkpoint_id,
                     model_profile_key=model_profile_key,
                     state=state,
@@ -271,6 +311,10 @@ class TravelAgentService:
                 await self.rollback_thread(user_id, request.thread_id)
                 raise
 
+        if state.interrupt is not None:
+            self._speech_service.cancel_generation(speech_job_id)
+            return
+
         final_response = build_final_response(
             latest_values=state.latest_values,
             accumulated_chunk=state.accumulated_chunk,
@@ -279,25 +323,96 @@ class TravelAgentService:
         )
         result_checkpoint_id = await self._checkpoint_service.find_latest_valid_checkpoint_id(request.thread_id)
         stored_parent_checkpoint_id = checkpoint_id or self._chat_store.get_thread_root_checkpoint_id(request.thread_id)
+        resolved_user_message_text = (
+            extract_latest_human_message_text(state.latest_values.get("messages") if state.latest_values else None)
+            or request.user_message
+        )
 
         try:
-            assistant_message_id, version_id = self._chat_store.append_assistant_message(
-                user_id,
-                request.thread_id,
-                final_response.assistant_message,
-                meta=final_response.meta.model_dump(),
-                reply_to_message_id=user_message_id,
-                parent_checkpoint_id=stored_parent_checkpoint_id,
-                result_checkpoint_id=result_checkpoint_id,
-            )
-            self._speech_service.bind_generation(
-                speech_job_id,
+            self._persist_completed_turn(
                 user_id=user_id,
                 thread_id=request.thread_id,
-                assistant_message_id=assistant_message_id,
-                version_id=version_id,
+                user_message_text=resolved_user_message_text,
+                model_profile_key=model_profile_key,
+                final_response=final_response,
+                result_checkpoint_id=result_checkpoint_id,
+                stored_parent_checkpoint_id=stored_parent_checkpoint_id,
+                speech_job_id=speech_job_id,
             )
-            self._speech_service.finish_generation(speech_job_id, final_response.assistant_message)
+        except Exception:
+            self._speech_service.cancel_generation(speech_job_id)
+            raise
+        self._chat_store.set_stable_checkpoint_id(user_id, request.thread_id, result_checkpoint_id)
+
+    async def stream_resume(self, user_id: str, request: ChatResumeRequest):
+        """恢复一条被 interrupt 暂停的聊天。"""
+        if self._runtime_service.runtime is None:
+            await self.startup()
+
+        model_profile_key = self._resolve_thread_model_profile_key(
+            user_id, request.thread_id, request.model_profile_key
+        )
+        state = StreamRunState()
+        speech_job_id = self._speech_service.start_generation(user_id, request.thread_id)
+
+        with langsmith_trace_context(
+            "chat.resume",
+            user_id=user_id,
+            thread_id=request.thread_id,
+            locale=request.locale,
+            model_profile_key=model_profile_key,
+            extra_metadata={"interrupt_id": request.interrupt_id},
+        ):
+            try:
+                async for event_name, event_payload in self._stream_service.stream_agent_run(
+                    thread_id=request.thread_id,
+                    agent_input=Command(resume={request.interrupt_id: request.answer}),
+                    checkpoint_id=None,
+                    model_profile_key=model_profile_key,
+                    state=state,
+                    agent_context=AgentRequestContext(
+                        user_id=user_id,
+                        thread_id=request.thread_id,
+                        locale=request.locale,
+                        model_profile_key=model_profile_key,
+                        session_meta=request.session_meta,
+                    ),
+                    on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
+                ):
+                    yield event_name, event_payload
+            except BaseException:
+                self._speech_service.cancel_generation(speech_job_id)
+                await self.rollback_thread(user_id, request.thread_id)
+                raise
+
+        if state.interrupt is not None:
+            self._speech_service.cancel_generation(speech_job_id)
+            return
+
+        final_response = build_final_response(
+            latest_values=state.latest_values,
+            accumulated_chunk=state.accumulated_chunk,
+            streamed_tool_traces=state.streamed_tool_traces,
+            runtime=self._runtime_service.require_runtime(),
+        )
+        result_checkpoint_id = await self._checkpoint_service.find_latest_valid_checkpoint_id(request.thread_id)
+        root_checkpoint_id = self._chat_store.get_thread_root_checkpoint_id(request.thread_id)
+        stored_parent_checkpoint_id = self._chat_store.get_stable_checkpoint_id(user_id, request.thread_id) or root_checkpoint_id
+        resolved_user_message_text = extract_latest_human_message_text(
+            state.latest_values.get("messages") if state.latest_values else None
+        )
+
+        try:
+            self._persist_completed_turn(
+                user_id=user_id,
+                thread_id=request.thread_id,
+                user_message_text=resolved_user_message_text,
+                model_profile_key=model_profile_key,
+                final_response=final_response,
+                result_checkpoint_id=result_checkpoint_id,
+                stored_parent_checkpoint_id=stored_parent_checkpoint_id,
+                speech_job_id=speech_job_id,
+            )
         except Exception:
             self._speech_service.cancel_generation(speech_job_id)
             raise

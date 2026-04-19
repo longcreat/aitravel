@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, field, is_dataclass
 import json
-from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage, message_to_dict
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage, message_to_dict
 from pydantic import BaseModel
 
 from app.agent.context import AgentRequestContext
 from app.agent.presentation import _content_to_text, _iter_base_messages
 from app.agent.runtime import AgentRuntimeService
 from app.llm.provider import get_llm_configurable
-from app.schemas.chat import ToolTrace
+from app.schemas.chat import ChatInterruptPayload, ToolTrace
 
 
 @dataclass
@@ -25,6 +25,7 @@ class StreamRunState:
     streamed_tool_traces: list[ToolTrace] = field(default_factory=list)
     seen_called: set[str] = field(default_factory=set)
     seen_returned: set[str] = field(default_factory=set)
+    interrupt: ChatInterruptPayload | None = None
 
 
 class AgentStreamService:
@@ -37,7 +38,7 @@ class AgentStreamService:
         self,
         *,
         thread_id: str,
-        user_message: str,
+        agent_input: dict[str, Any] | Any,
         checkpoint_id: str | None,
         model_profile_key: str,
         state: StreamRunState,
@@ -55,7 +56,7 @@ class AgentStreamService:
             configurable["checkpoint_id"] = checkpoint_id
 
         async for part in runtime.agent.astream(
-            {"messages": [HumanMessage(content=user_message)]},
+            agent_input,
             config={"configurable": configurable},
             context=agent_context,
             stream_mode=["messages", "updates", "values"],
@@ -66,6 +67,12 @@ class AgentStreamService:
 
             part_type = str(part.get("type", "")).strip()
             raw_data = part.get("data")
+            interrupt_payload = _extract_interrupt_payload(part)
+
+            if interrupt_payload is not None:
+                state.interrupt = interrupt_payload
+                yield "interrupt", interrupt_payload.model_dump()
+                continue
 
             if part_type == "messages":
                 message_chunk, _stream_meta = _extract_ai_chunk_event(raw_data)
@@ -90,6 +97,39 @@ class AgentStreamService:
                 state.latest_values = raw_data
 
             yield part_type or "message", _serialize_stream_part(part)
+
+
+def _extract_interrupt_payload(part: dict[str, Any]) -> ChatInterruptPayload | None:
+    """从 LangGraph stream part 中提取标准化 interrupt 负载。"""
+    interrupts = part.get("interrupts")
+    if not interrupts and part.get("type") == "updates":
+        raw_data = part.get("data")
+        if isinstance(raw_data, dict):
+            interrupts = raw_data.get("__interrupt__")
+
+    if not isinstance(interrupts, (list, tuple)) or not interrupts:
+        return None
+
+    first_interrupt = interrupts[0]
+    interrupt_id = getattr(first_interrupt, "id", None)
+    interrupt_value = getattr(first_interrupt, "value", None)
+    if isinstance(first_interrupt, dict):
+        interrupt_id = interrupt_id or first_interrupt.get("id")
+        interrupt_value = interrupt_value if interrupt_value is not None else first_interrupt.get("value")
+
+    if not interrupt_id:
+        return None
+
+    if isinstance(interrupt_value, dict):
+        payload = dict(interrupt_value)
+    else:
+        payload = {"question": str(interrupt_value)}
+
+    payload["interrupt_id"] = str(interrupt_id)
+    payload.setdefault("kind", "clarification")
+    payload.setdefault("allow_custom_input", True)
+    payload.setdefault("suggested_replies", [])
+    return ChatInterruptPayload.model_validate(payload)
 
 
 def _extract_ai_chunk_event(payload: Any) -> tuple[AIMessageChunk | None, dict[str, Any]]:
@@ -176,6 +216,8 @@ def _serialize_native_value(value: Any) -> Any:
         return message_to_dict(value)
     if isinstance(value, BaseModel):
         return value.model_dump()
+    if is_dataclass(value):
+        return _serialize_native_value(asdict(value))
     if isinstance(value, dict):
         return {str(key): _serialize_native_value(item) for key, item in value.items()}
     if isinstance(value, tuple):

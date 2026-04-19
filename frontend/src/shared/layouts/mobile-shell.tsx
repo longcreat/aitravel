@@ -46,7 +46,7 @@ export function MobileShell({ children, className, ...props }: MobileShellProps)
   const [overlayRoot, setOverlayRoot] = React.useState<HTMLDivElement | null>(null);
 
   return (
-    <div className="flex min-h-dvh w-full items-center justify-center bg-gray-100 sm:py-4">
+    <div className="flex h-dvh w-full items-center justify-center overflow-hidden bg-gray-100 sm:py-4">
       <AppSurfaceOverlayRootContext.Provider value={overlayRoot}>
         <main
           className={cn(

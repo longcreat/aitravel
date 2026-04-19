@@ -9,6 +9,7 @@ import { useChatAgent } from "@/features/chat/hooks/use-chat-agent";
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
 import { HttpError } from "@/shared/lib/http";
+import { BrowserProvider, useBrowser } from "@/shared/lib/browser";
 import { 
   AppSurfaceSheet,
   Button, 
@@ -23,6 +24,7 @@ import {
   DialogDescription,
   DialogFooter,
   Input,
+  InAppBrowserSheet,
 } from "@/shared/ui";
 interface SessionGroup {
   label: "今日" | "7日" | "30日" | "更早";
@@ -136,12 +138,21 @@ function groupSessionsByUpdatedAt(sessions: SessionSummary[]): SessionGroup[] {
 }
 
 export function ChatPage() {
+  return (
+    <BrowserProvider>
+      <ChatPageInner />
+    </BrowserProvider>
+  );
+}
+
+function ChatPageInner() {
   const navigate = useNavigate();
   const { threadId: routeThreadId } = useParams<{ threadId?: string }>();
   const { openAuthModal, ready: authReady, user } = useAuth();
   const {
     threadId,
     messages,
+    pendingInterrupt,
     sessions,
     sessionsReady,
     modelProfiles,
@@ -171,6 +182,7 @@ export function ChatPage() {
   const [renameInput, setRenameInput] = useState("");
   const [modelProfileSheetOpen, setModelProfileSheetOpen] = useState(false);
   const [playingSpeechKey, setPlayingSpeechKey] = useState<string | null>(null);
+  const { url: browserUrl, close: closeBrowser } = useBrowser();
   
   const listRef = useRef<HTMLDivElement | null>(null);
   const pendingNewThreadIdRef = useRef<string | null>(null);
@@ -325,6 +337,10 @@ export function ChatPage() {
     await sendMessage(buildQuickPrompt(kind));
   }
 
+  async function handleSelectClarificationReply(_messageId: string, reply: string) {
+    await sendMessage(reply);
+  }
+
   async function handleToggleSpeech(messageId: string, versionId: string) {
     const speechKey = `${messageId}:${versionId}`;
     if (playingSpeechKeyRef.current === speechKey) {
@@ -388,7 +404,9 @@ export function ChatPage() {
   }
 
   return (
-    <div className="flex h-full w-full flex-col">
+    <>
+      <InAppBrowserSheet url={browserUrl} onClose={closeBrowser} />
+      <div className="flex h-full w-full flex-col">
 
       {historyOpen ? (
         <div className={`absolute inset-0 z-30 flex ${isAuthenticated ? "bg-black/30" : "bg-transparent"}`}>
@@ -628,6 +646,7 @@ export function ChatPage() {
             onSwitchVersion={handleSelectAssistantVersion}
             onFeedback={setAssistantFeedback}
             onToggleSpeech={handleToggleSpeech}
+            onSelectClarificationReply={handleSelectClarificationReply}
             isSpeechPlaying={playingSpeechKey === getSpeechMessageKey(message)}
           />
         ))}
@@ -649,6 +668,7 @@ export function ChatPage() {
         loading={loading}
         ready={authReady}
         modelProfileLabel={selectedModelProfileLabel}
+        placeholder={pendingInterrupt ? "补充一下上面缺失的信息，我会继续帮你完成这次请求" : undefined}
         onSend={sendMessage}
         onOpenModelProfileSheet={() => setModelProfileSheetOpen(true)}
         onStop={stopGenerating}
@@ -735,5 +755,6 @@ export function ChatPage() {
       </Dialog>
 
     </div>
+    </>
   );
 }

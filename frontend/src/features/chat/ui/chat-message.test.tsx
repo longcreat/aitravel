@@ -316,6 +316,36 @@ describe("ChatMessage", () => {
     expect(screen.getByText("这是最终答复。")).toBeInTheDocument();
   });
 
+  it("renders clarification replies for interrupt messages and forwards the selected reply", async () => {
+    const onSelectClarificationReply = vi.fn();
+
+    const message: ChatMessageItem = {
+      id: "assistant-interrupt",
+      role: "assistant",
+      text: "请问你想查哪个城市的天气？",
+      interrupt: {
+        kind: "clarification",
+        interrupt_id: "interrupt-city",
+        question: "请问你想查哪个城市的天气？",
+        missing_field: "city",
+        suggested_replies: ["杭州", "上海"],
+        allow_custom_input: true,
+      },
+      meta: { ...emptyMeta },
+    };
+
+    renderWithOverlayRoot(
+      <ChatMessage message={message} onSelectClarificationReply={onSelectClarificationReply} />,
+    );
+
+    expect(screen.getByText("请问你想查哪个城市的天气？")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "copy-message-assistant-interrupt" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "杭州" }));
+
+    expect(onSelectClarificationReply).toHaveBeenCalledWith("assistant-interrupt", "杭州");
+  });
+
   it("shows stop icon when current speech is playing", () => {
     const message: ChatMessageItem = {
       id: "persisted-msg-77",

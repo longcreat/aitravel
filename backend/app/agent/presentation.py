@@ -60,6 +60,15 @@ def _extract_state_messages(payload: Any) -> list[BaseMessage]:
     return list(_iter_base_messages(payload))
 
 
+def extract_latest_human_message_text(payload: Any) -> str:
+    """读取状态里最近一条用户消息文本。"""
+    messages = _extract_state_messages(payload)
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return _content_to_text(message.content).strip()
+    return ""
+
+
 def _iter_base_messages(payload: Any):
     """递归遍历负载中的 LangChain `BaseMessage`。"""
     if isinstance(payload, BaseMessage):
@@ -117,11 +126,6 @@ def _find_step_item(step_groups: list[StepGroup], tool_call_id: str) -> StepDeta
     return None
 
 
-def _format_tool_name(tool_name: str) -> str:
-    """把工具名做轻量可读化。"""
-    return tool_name.replace("_", " ").replace("-", " ").strip()
-
-
 def _summarize_step_payload(payload: Any, status: str) -> str:
     """生成步骤详情里的简短说明。"""
     if status == "running":
@@ -170,7 +174,7 @@ def _build_step_presentation(
                 step_group.items.append(
                     StepDetailItem(
                         id=tool_call_id,
-                        tool_name=_format_tool_name(str(call.get("name", "unknown"))),
+                        tool_name=str(call.get("name", "unknown")),
                         status="running",
                         summary=_summarize_step_payload(call.get("args", {}), "running"),
                     )
@@ -192,7 +196,7 @@ def _build_step_presentation(
         step_group.items.append(
             StepDetailItem(
                 id=tool_call_id,
-                tool_name=_format_tool_name(str(message.name or "unknown")),
+                tool_name=str(message.name or "unknown"),
                 status=result_status,  # type: ignore[arg-type]
                 summary=_summarize_step_payload(message.content, result_status),
             )

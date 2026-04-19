@@ -10,17 +10,20 @@ import {
   regenerateAssistantMessage,
   renameSession,
   streamChat,
+  streamChatResume,
   switchAssistantVersion,
   updateSessionModelProfile,
   updateAssistantFeedback,
 } from "@/features/chat/api/chat.api";
 import type {
   AssistantVersionFeedback,
+  ChatInterruptPayload,
   ChatModelProfile,
   ChatMetaInfo,
   ChatFinalPayload,
   ChatRenderSegment,
   ChatMessageItem,
+  ChatStreamEvent,
   SendIntentResult,
   SerializedLangChainMessage,
   SessionDetail,
@@ -29,6 +32,12 @@ import type {
   StepGroup,
   ToolTrace,
 } from "@/features/chat/model/chat.types";
+
+interface PendingInterruptState extends ChatInterruptPayload {
+  assistant_message_id: string;
+  thread_id: string;
+  model_profile_key: string | null;
+}
 
 function createThreadId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -221,6 +230,11 @@ function collectToolTraces(
           continue;
         }
         seenCalled.add(callId);
+        // request_user_clarification 是 human-in-the-loop 的内部机制，interrupt UI 已处理展示，
+        // Step Summary 中不显示此工具（任何阶段）。
+        if (toolName === "request_user_clarification") {
+          continue;
+        }
         traces.push({
           phase: "called",
           tool_name: toolName,
@@ -237,6 +251,10 @@ function collectToolTraces(
     }
 
     const toolName = String(message.data.name ?? "unknown");
+    // 同上：request_user_clarification 的返回结果也不在 Summary 显示。
+    if (toolName === "request_user_clarification") {
+      continue;
+    }
     const payloadText = contentToText(message.data.content);
     const returnedKey = String(message.data.tool_call_id ?? `${toolName}:${payloadText}`);
     if (seenReturned.has(returnedKey)) {
@@ -290,10 +308,6 @@ function getVisibleTextFromSegments(renderSegments: ChatRenderSegment[]): string
     .join("");
 }
 
-function formatToolName(toolName: string): string {
-  return toolName.replace(/[_-]+/g, " ").trim();
-}
-
 function summarizeToolPayload(payload: unknown, status: "running" | "success" | "error"): string {
   if (status === "running") {
     return "Running";
@@ -343,14 +357,19 @@ function applyToolTraceToPresentation(
   stepGroups: StepGroup[],
   renderSegments: ChatRenderSegment[],
 ) {
-  const normalizedToolName = formatToolName(trace.tool_name);
+  // request_user_clarification 是 human-in-the-loop 内部机制，interrupt UI 已处理，
+  // 不在 Step Summary 中显示任何阶段。
+  if (trace.tool_name === "request_user_clarification") {
+    return;
+  }
+
   const normalizedCallId = trace.tool_call_id ?? `${trace.tool_name}-${stepGroups.length + 1}-${Date.now()}`;
 
   if (trace.phase === "called") {
     const stepGroup = getOrCreateCurrentStepGroup(stepGroups, renderSegments);
     const existing = stepGroup.items.find((item) => item.id === normalizedCallId);
     if (existing) {
-      existing.tool_name = normalizedToolName;
+      existing.tool_name = trace.tool_name;
       existing.status = "running";
       existing.summary = summarizeToolPayload(trace.payload, "running");
       return;
@@ -358,7 +377,7 @@ function applyToolTraceToPresentation(
 
     stepGroup.items.push({
       id: normalizedCallId,
-      tool_name: normalizedToolName,
+      tool_name: trace.tool_name,
       status: "running",
       summary: summarizeToolPayload(trace.payload, "running"),
     });
@@ -368,7 +387,7 @@ function applyToolTraceToPresentation(
   const resolvedStatus: StepDetailItem["status"] = trace.result_status === "error" ? "error" : "success";
   const existingItem = findExistingStepItem(stepGroups, normalizedCallId);
   if (existingItem) {
-    existingItem.tool_name = normalizedToolName;
+    existingItem.tool_name = trace.tool_name;
     existingItem.status = resolvedStatus;
     existingItem.summary = summarizeToolPayload(trace.payload, resolvedStatus);
     return;
@@ -377,7 +396,7 @@ function applyToolTraceToPresentation(
   const stepGroup = getOrCreateCurrentStepGroup(stepGroups, renderSegments);
   stepGroup.items.push({
     id: normalizedCallId,
-    tool_name: normalizedToolName,
+    tool_name: trace.tool_name,
     status: resolvedStatus,
     summary: summarizeToolPayload(trace.payload, resolvedStatus),
   });
@@ -426,7 +445,7 @@ function buildPresentationFromSerializedMessages(payload: unknown) {
         }
         stepGroup.items.push({
           id: normalizedCallId,
-          tool_name: formatToolName(String(call?.name ?? "unknown")),
+          tool_name: String(call?.name ?? "unknown"),
           status: "running",
           summary: summarizeToolPayload(call?.args ?? {}, "running"),
         });
@@ -435,6 +454,11 @@ function buildPresentationFromSerializedMessages(payload: unknown) {
     }
 
     if (message.type !== "tool") {
+      continue;
+    }
+
+    // request_user_clarification 是 human-in-the-loop 内部机制，Step Summary 不显示。
+    if (String(message.data.name ?? "") === "request_user_clarification") {
       continue;
     }
 
@@ -450,7 +474,7 @@ function buildPresentationFromSerializedMessages(payload: unknown) {
     const stepGroup = getOrCreateCurrentStepGroup(stepGroups, renderSegments);
     stepGroup.items.push({
       id: normalizedCallId,
-      tool_name: formatToolName(String(message.data.name ?? "unknown")),
+      tool_name: String(message.data.name ?? "unknown"),
       status: resolvedStatus,
       summary: summarizeToolPayload(message.data.content, resolvedStatus),
     });
@@ -515,6 +539,7 @@ export function useChatAgent(initialThreadId?: string) {
   const [modelProfiles, setModelProfiles] = useState<ChatModelProfile[]>([]);
   const [defaultModelProfileKey, setDefaultModelProfileKey] = useState("");
   const [selectedModelProfileKey, setSelectedModelProfileKey] = useState("");
+  const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterruptState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastSubmittedMessageRef = useRef<string | null>(null);
@@ -525,6 +550,10 @@ export function useChatAgent(initialThreadId?: string) {
 
   useEffect(() => {
     activeThreadIdRef.current = threadId;
+  }, [threadId]);
+
+  useEffect(() => {
+    setPendingInterrupt(null);
   }, [threadId]);
 
   const canStartRequest = useMemo(() => ready && !loading, [loading, ready]);
@@ -579,6 +608,7 @@ export function useChatAgent(initialThreadId?: string) {
   const hydrateThreadMessages = useCallback(async (targetThreadId: string) => {
     const detail = await getSession(targetThreadId);
     if (activeThreadIdRef.current === targetThreadId) {
+      setPendingInterrupt(null);
       setMessages(toChatMessageItems(detail.messages));
       setSelectedModelProfileKey(detail.model_profile_key);
     }
@@ -688,14 +718,18 @@ export function useChatAgent(initialThreadId?: string) {
     [isAuthenticated, loading, ready],
   );
 
-  async function executeSend(normalized: string, modelProfileKeyOverride?: string | null): Promise<void> {
+  async function executeSend(
+    normalized: string,
+    modelProfileKeyOverride?: string | null,
+    resumeTarget?: PendingInterruptState | null,
+  ): Promise<void> {
     requestInFlightRef.current = true;
     setError(null);
     const effectiveModelProfileKey = (modelProfileKeyOverride ?? selectedModelProfileKey) || null;
 
-    const userMessageId = createMessageId();
-    const assistantMessageId = createMessageId();
-    const targetThreadId = threadId;
+    const userMessageId = resumeTarget ? null : createMessageId();
+    const assistantMessageId = resumeTarget?.assistant_message_id ?? createMessageId();
+    const targetThreadId = resumeTarget?.thread_id ?? threadId;
     const streamedToolTraces: ToolTrace[] = [];
     const streamedStepGroups: StepGroup[] = [];
     const streamedRenderSegments: ChatRenderSegment[] = [];
@@ -703,15 +737,29 @@ export function useChatAgent(initialThreadId?: string) {
     const seenCalled = new Set<string>();
     const seenReturned = new Set<string>();
     let hasValuesResult = false;
+    let interrupted = false;
     let shouldHydratePersistedThread = false;
 
-    setMessages((prev) => [
-      ...prev,
-      { id: userMessageId, role: "user", text: normalized },
-      { id: assistantMessageId, role: "assistant", text: "", status: "streaming", versions: [], can_regenerate: false },
-    ]);
+    if (resumeTarget) {
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === assistantMessageId
+            ? {
+                ...item,
+                status: "streaming",
+              }
+            : item,
+        ),
+      );
+    } else {
+      setMessages((prev) => [
+        ...prev,
+        { id: userMessageId!, role: "user", text: normalized },
+        { id: assistantMessageId, role: "assistant", text: "", status: "streaming", versions: [], can_regenerate: false },
+      ]);
+      lastSubmittedMessageRef.current = normalized;
+    }
     setLoading(true);
-    lastSubmittedMessageRef.current = normalized;
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
@@ -734,106 +782,139 @@ export function useChatAgent(initialThreadId?: string) {
     });
 
     try {
-      await streamChat(
-        {
-          thread_id: targetThreadId,
-          user_message: normalized,
-          locale: "zh-CN",
-          model_profile_key: effectiveModelProfileKey,
-          session_meta: {},
-        },
-        {
-          signal: abortController.signal,
-          onEvent: (event) => {
-            if (event.event === "messages") {
-              const chunk = extractMessageChunk(event.data.data);
-              if (!chunk) {
-                return;
-              }
+      const handleEvent = (event: ChatStreamEvent) => {
+        if (event.event === "interrupt") {
+          interrupted = true;
+          setPendingInterrupt({
+            ...event.data,
+            assistant_message_id: assistantMessageId,
+            thread_id: targetThreadId,
+            model_profile_key: effectiveModelProfileKey,
+          });
+          patchAssistantMessage((draft) => ({
+            ...draft,
+            text: event.data.question,
+            interrupt: event.data,
+            status: undefined,
+            meta: buildSettledMeta(draft.meta),
+          }));
+          return;
+        }
 
-              const chunkText = contentToText(chunk.data.content);
-              const chunkReasoningText = extractReasoningTextFromSerializedMessage(chunk);
-              if (!chunkText && !chunkReasoningText) {
-                return;
-              }
+        if (event.event === "messages") {
+          const chunk = extractMessageChunk(event.data.data);
+          if (!chunk) {
+            return;
+          }
 
-              if (chunkReasoningText) {
-                streamedReasoningText += chunkReasoningText;
-              }
+          const chunkText = contentToText(chunk.data.content);
+          const chunkReasoningText = extractReasoningTextFromSerializedMessage(chunk);
+          if (!chunkText && !chunkReasoningText) {
+            return;
+          }
 
-              if (chunkText) {
-                appendTextSegment(streamedRenderSegments, chunkText);
-              }
-              patchAssistantMessage((draft) => ({
-                ...draft,
-                text: getVisibleTextFromSegments(streamedRenderSegments),
-                meta: buildStreamingMeta(draft.meta),
-                status: "streaming",
-              }));
-              return;
-            }
+          if (chunkReasoningText) {
+            streamedReasoningText += chunkReasoningText;
+          }
 
-            if (event.event === "updates") {
-              const newTraces = collectToolTraces(event.data.data, seenCalled, seenReturned);
-              if (!newTraces.length) {
-                return;
-              }
+          if (chunkText) {
+            appendTextSegment(streamedRenderSegments, chunkText);
+          }
+          patchAssistantMessage((draft) => ({
+            ...draft,
+            text: getVisibleTextFromSegments(streamedRenderSegments),
+            interrupt: undefined,
+            meta: buildStreamingMeta(draft.meta),
+            status: "streaming",
+          }));
+          return;
+        }
 
-              streamedToolTraces.push(...newTraces);
-              for (const trace of newTraces) {
-                applyToolTraceToPresentation(trace, streamedStepGroups, streamedRenderSegments);
-              }
-              patchAssistantMessage((draft) => ({
-                ...draft,
-                meta: buildStreamingMeta(draft.meta),
-                status: "streaming",
-              }));
-              return;
-            }
+        if (event.event === "updates") {
+          const newTraces = collectToolTraces(event.data.data, seenCalled, seenReturned);
+          if (!newTraces.length) {
+            return;
+          }
 
-            if (event.event === "values") {
-              const finalPayload = buildFinalPayloadFromValues(
-                event.data.data,
-                getVisibleTextFromSegments(streamedRenderSegments),
-                streamedToolTraces,
-              );
-              if (!finalPayload) {
-                return;
-              }
+          streamedToolTraces.push(...newTraces);
+          for (const trace of newTraces) {
+            applyToolTraceToPresentation(trace, streamedStepGroups, streamedRenderSegments);
+          }
+          patchAssistantMessage((draft) => ({
+            ...draft,
+            interrupt: undefined,
+            meta: buildStreamingMeta(draft.meta),
+            status: "streaming",
+          }));
+          return;
+        }
 
-              const hasStableAssistantMessage = Boolean(finalPayload.assistant_message.trim());
-              if (hasStableAssistantMessage) {
-                hasValuesResult = true;
-                shouldHydratePersistedThread = true;
-              }
-              // Keep status as "streaming" even when values arrive — the stream may continue
-              // with more tool calls. Status will be cleared only after streamChat resolves.
-              patchAssistantMessage((draft) => ({
-                ...draft,
-                text: finalPayload.assistant_message || draft.text || getVisibleTextFromSegments(streamedRenderSegments),
-                status: "streaming",
-                meta: finalPayload.meta,
-              }));
-              return;
-            }
+        if (event.event === "values") {
+          const finalPayload = buildFinalPayloadFromValues(
+            event.data.data,
+            getVisibleTextFromSegments(streamedRenderSegments),
+            streamedToolTraces,
+          );
+          if (!finalPayload) {
+            return;
+          }
 
-            if (event.event === "error") {
-              setError(event.data.message);
-              patchAssistantMessage((draft) => ({
-                ...draft,
-                text:
-                  getVisibleTextFromSegments(streamedRenderSegments) ||
-                  draft.text ||
-                  "当前请求失败，可能是网络或后端服务异常。你可以重试，或先告诉我你希望去哪里。",
-                status: undefined,
-                meta: buildSettledMeta(draft.meta),
-              }));
-            }
+          const hasStableAssistantMessage = Boolean(finalPayload.assistant_message.trim());
+          if (hasStableAssistantMessage) {
+            hasValuesResult = true;
+            shouldHydratePersistedThread = true;
+            setPendingInterrupt(null);
+          }
+          patchAssistantMessage((draft) => ({
+            ...draft,
+            text: finalPayload.assistant_message || draft.text || getVisibleTextFromSegments(streamedRenderSegments),
+            interrupt: undefined,
+            status: "streaming",
+            meta: finalPayload.meta,
+          }));
+          return;
+        }
+
+        if (event.event === "error") {
+          setError(event.data.message);
+          patchAssistantMessage((draft) => ({
+            ...draft,
+            text:
+              getVisibleTextFromSegments(streamedRenderSegments) ||
+              draft.text ||
+              "当前请求失败，可能是网络或后端服务异常。你可以重试，或先告诉我你希望去哪里。",
+            status: undefined,
+            meta: buildSettledMeta(draft.meta),
+          }));
+        }
+      };
+
+      if (resumeTarget) {
+        await streamChatResume(
+          {
+            thread_id: targetThreadId,
+            interrupt_id: resumeTarget.interrupt_id,
+            answer: normalized,
+            locale: "zh-CN",
+            model_profile_key: effectiveModelProfileKey,
+            session_meta: {},
           },
-        },
-      );
+          { signal: abortController.signal, onEvent: handleEvent },
+        );
+      } else {
+        await streamChat(
+          {
+            thread_id: targetThreadId,
+            user_message: normalized,
+            locale: "zh-CN",
+            model_profile_key: effectiveModelProfileKey,
+            session_meta: {},
+          },
+          { signal: abortController.signal, onEvent: handleEvent },
+        );
+      }
 
-      if (!hasValuesResult) {
+      if (!hasValuesResult && !interrupted) {
         patchAssistantMessage((draft) => ({
           ...draft,
           text: getVisibleTextFromSegments(streamedRenderSegments) || draft.text || "当前未拿到完整响应，请重试。",
@@ -850,6 +931,7 @@ export function useChatAgent(initialThreadId?: string) {
           ...draft,
           text: draft.text || "已停止生成",
           status: "stopped",
+          interrupt: draft.interrupt,
           meta: draft.meta ?? {
             ...fallbackMetaInfo,
             tool_traces: [...streamedToolTraces],
@@ -869,13 +951,11 @@ export function useChatAgent(initialThreadId?: string) {
           draft.text ||
           "当前请求失败，可能是网络或后端服务异常。你可以重试，或先告诉我你希望去哪里。",
         status: undefined,
+        interrupt: draft.interrupt,
         meta: buildSettledMeta(draft.meta),
       }));
     } finally {
-      // Stream is fully done — clear the streaming status so the copy button becomes visible.
-      // If hasValuesResult is true the status is still "streaming" (we deferred clearing it).
-      // Hydration below will overwrite the message anyway, but this is a reliable safety net.
-      if (hasValuesResult) {
+      if (hasValuesResult && !interrupted) {
         patchAssistantMessage((draft) => ({
           ...draft,
           status: draft.status === "stopped" ? "stopped" : undefined,
@@ -918,7 +998,7 @@ export function useChatAgent(initialThreadId?: string) {
       return intent;
     }
 
-    void executeSend(intent.message, options?.modelProfileKey);
+    void executeSend(intent.message, options?.modelProfileKey, pendingInterrupt);
     return intent;
   }
 
@@ -1139,6 +1219,7 @@ export function useChatAgent(initialThreadId?: string) {
   return {
     threadId,
     messages,
+    pendingInterrupt,
     sessions,
     sessionsReady,
     modelProfiles,

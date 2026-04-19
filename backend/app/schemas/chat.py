@@ -28,6 +28,28 @@ class ChatInvokeRequest(BaseModel):
     session_meta: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatResumeRequest(BaseModel):
+    """恢复被 interrupt 暂停的聊天请求。"""
+
+    thread_id: str = Field(min_length=1)
+    interrupt_id: str = Field(min_length=1)
+    answer: str = Field(min_length=1, max_length=4000)
+    locale: str = Field(default="zh-CN")
+    model_profile_key: str | None = None
+    session_meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatInterruptPayload(BaseModel):
+    """前端可消费的 interrupt 负载。"""
+
+    kind: Literal["clarification"] = "clarification"
+    interrupt_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    missing_field: str | None = None
+    suggested_replies: list[str] = Field(default_factory=list)
+    allow_custom_input: bool = True
+
+
 class ToolTrace(BaseModel):
     """工具调用轨迹条目。"""
 
