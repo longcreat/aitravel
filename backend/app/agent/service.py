@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,8 @@ from app.schemas.chat import (
     SessionSummary,
 )
 from app.speech.service import SpeechPlaybackTarget, SpeechService
+
+logger = logging.getLogger(__name__)
 
 
 class TravelAgentService:
@@ -188,6 +192,25 @@ class TravelAgentService:
         )
         self._speech_service.finish_generation(speech_job_id, final_response.assistant_message)
 
+    def _log_pipeline_failure(
+        self,
+        action: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        model_profile_key: str,
+        checkpoint_id: str | None,
+    ) -> None:
+        """记录聊天主链路异常，便于后端排查。"""
+        logger.exception(
+            "%s failed user_id=%s thread_id=%s model_profile_key=%s checkpoint_id=%s",
+            action,
+            user_id,
+            thread_id,
+            model_profile_key,
+            checkpoint_id,
+        )
+
     async def stream_regenerate(self, user_id: str, thread_id: str, assistant_message_id: str):
         """重新生成最新一条 assistant 回复。"""
         if self._runtime_service.runtime is None:
@@ -229,7 +252,15 @@ class TravelAgentService:
                         deferred_values_event = (event_name, event_payload)
                         continue
                     yield event_name, event_payload
-            except BaseException:
+            except BaseException as exc:
+                if not isinstance(exc, asyncio.CancelledError):
+                    self._log_pipeline_failure(
+                        "chat.regenerate",
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        model_profile_key=model_profile_key,
+                        checkpoint_id=target.original_parent_checkpoint_id,
+                    )
                 self._speech_service.cancel_generation(speech_job_id)
                 await self.rollback_thread(user_id, thread_id)
                 raise
@@ -240,7 +271,7 @@ class TravelAgentService:
             streamed_tool_traces=state.streamed_tool_traces,
             runtime=self._runtime_service.require_runtime(),
         )
-        result_checkpoint_id = await self._checkpoint_service.find_latest_valid_checkpoint_id(thread_id)
+        result_checkpoint_id = await self._checkpoint_service.get_latest_checkpoint_id(thread_id)
         try:
             version_id = self._chat_store.upsert_regenerated_version(
                 user_id,
@@ -306,7 +337,15 @@ class TravelAgentService:
                     on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
                 ):
                     yield event_name, event_payload
-            except BaseException:
+            except BaseException as exc:
+                if not isinstance(exc, asyncio.CancelledError):
+                    self._log_pipeline_failure(
+                        "chat.stream",
+                        user_id=user_id,
+                        thread_id=request.thread_id,
+                        model_profile_key=model_profile_key,
+                        checkpoint_id=checkpoint_id,
+                    )
                 self._speech_service.cancel_generation(speech_job_id)
                 await self.rollback_thread(user_id, request.thread_id)
                 raise
@@ -321,7 +360,7 @@ class TravelAgentService:
             streamed_tool_traces=state.streamed_tool_traces,
             runtime=self._runtime_service.require_runtime(),
         )
-        result_checkpoint_id = await self._checkpoint_service.find_latest_valid_checkpoint_id(request.thread_id)
+        result_checkpoint_id = await self._checkpoint_service.get_latest_checkpoint_id(request.thread_id)
         stored_parent_checkpoint_id = checkpoint_id or self._chat_store.get_thread_root_checkpoint_id(request.thread_id)
         resolved_user_message_text = (
             extract_latest_human_message_text(state.latest_values.get("messages") if state.latest_values else None)
@@ -380,7 +419,19 @@ class TravelAgentService:
                     on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
                 ):
                     yield event_name, event_payload
-            except BaseException:
+            except BaseException as exc:
+                if not isinstance(exc, asyncio.CancelledError):
+                    resume_parent_checkpoint_id = await self._checkpoint_service.get_effective_checkpoint_id(
+                        user_id,
+                        request.thread_id,
+                    )
+                    self._log_pipeline_failure(
+                        "chat.resume",
+                        user_id=user_id,
+                        thread_id=request.thread_id,
+                        model_profile_key=model_profile_key,
+                        checkpoint_id=resume_parent_checkpoint_id,
+                    )
                 self._speech_service.cancel_generation(speech_job_id)
                 await self.rollback_thread(user_id, request.thread_id)
                 raise
@@ -395,9 +446,11 @@ class TravelAgentService:
             streamed_tool_traces=state.streamed_tool_traces,
             runtime=self._runtime_service.require_runtime(),
         )
-        result_checkpoint_id = await self._checkpoint_service.find_latest_valid_checkpoint_id(request.thread_id)
+        result_checkpoint_id = await self._checkpoint_service.get_latest_checkpoint_id(request.thread_id)
         root_checkpoint_id = self._chat_store.get_thread_root_checkpoint_id(request.thread_id)
-        stored_parent_checkpoint_id = self._chat_store.get_stable_checkpoint_id(user_id, request.thread_id) or root_checkpoint_id
+        stored_parent_checkpoint_id = (
+            await self._checkpoint_service.get_effective_checkpoint_id(user_id, request.thread_id)
+        ) or root_checkpoint_id
         resolved_user_message_text = extract_latest_human_message_text(
             state.latest_values.get("messages") if state.latest_values else None
         )

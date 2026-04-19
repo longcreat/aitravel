@@ -1362,6 +1362,94 @@ describe("ChatPage", () => {
     expect(window.localStorage.getItem("ai-travel-access-token")).toBeNull();
   });
 
+  it("hides stream error details and keeps the generic assistant fallback", async () => {
+    setStoredAccessToken("token-stream-error");
+    setStoredAuthUser({
+      id: "user-stream-error",
+      email: "stream-error@example.com",
+      nickname: "stream-error",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const stream = createSseStream([
+      'event: error\ndata: {"message":"请求失败，请稍后重试。"}\n\n',
+    ]);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/api/auth/me") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            id: "user-stream-error",
+            email: "stream-error@example.com",
+            nickname: "stream-error",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/chat/model-profiles") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => modelProfilesResponse,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.endsWith("/api/sessions") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown[]> => [],
+          text: async (): Promise<string> => "[]",
+        };
+      }
+
+      if (url.includes("/api/chat/stream") && method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          body: stream,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      return {
+        ok: false,
+        status: 404,
+        text: async (): Promise<string> => "not found",
+      };
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    renderChatPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "new-session" })).toBeInTheDocument();
+    });
+
+    const input = await screen.findByPlaceholderText("发消息或按住说话");
+    await userEvent.type(input, "今天的天气咋样");
+    await userEvent.click(screen.getByRole("button", { name: "send-message" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("当前请求失败，可能是网络或后端服务异常。你可以重试，或先告诉我你希望去哪里。"),
+      ).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("请求失败：")).not.toBeInTheDocument();
+    expect(screen.queryByText("请求失败，请稍后重试。")).not.toBeInTheDocument();
+  });
+
   it("keeps the previous assistant reply when regenerate fails", async () => {
     setStoredAccessToken("token-regenerate");
     setStoredAuthUser({
@@ -1491,6 +1579,8 @@ describe("ChatPage", () => {
     await waitFor(() => {
       expect(screen.getByText("旧的推荐结果")).toBeInTheDocument();
     });
+
+    expect(screen.queryByText("请求失败：")).not.toBeInTheDocument();
   });
 
   it("requests playback url and plays assistant speech", async () => {

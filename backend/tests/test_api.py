@@ -546,3 +546,40 @@ def test_regenerate_stream_returns_business_error_when_limit_reached(
         assert regenerate_events == [("error", {"message": "最多生成三次无法重新生成"})]
 
     app.dependency_overrides.clear()
+
+
+def test_chat_stream_hides_internal_exception_details(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CHAT_SQLITE_PATH", str(tmp_path / "chat.db"))
+
+    class _CrashedService(_FakeService):
+        async def stream_invoke(self, _user_id: str, _payload):
+            if False:
+                yield "values", {}
+            raise RuntimeError("provider exploded with internal details")
+
+    fake_service = _CrashedService()
+    monkeypatch.setattr("app.main.get_agent_service", lambda: fake_service)
+    app = create_app()
+    app.dependency_overrides[get_agent_service] = lambda: fake_service
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        id="user-1",
+        email="demo@example.com",
+        nickname="demo",
+        created_at="2026-04-05T00:00:00Z",
+        updated_at="2026-04-05T00:00:00Z",
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/chat/stream",
+            json={
+                "thread_id": "t-1",
+                "user_message": "帮我做一个3天杭州行程",
+                "locale": "zh-CN",
+                "session_meta": {},
+            },
+        )
+        assert response.status_code == 200
+        assert _parse_sse(response.text) == [("error", {"message": "请求失败，请稍后重试。"})]
+
+    app.dependency_overrides.clear()

@@ -19,6 +19,7 @@ from app.schemas.auth import AuthUser
 from app.schemas.chat import ChatInvokeRequest, ChatResumeRequest, ListChatModelProfilesResponse, StreamErrorPayload
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+GENERIC_STREAM_ERROR_MESSAGE = "请求失败，请稍后重试。"
 
 
 def _encode_sse(event: str, data: dict) -> bytes:
@@ -53,10 +54,10 @@ async def stream_chat(
             return
         except ValueError as exc:
             yield _encode_sse("error", StreamErrorPayload(message=str(exc)).model_dump())
-        except Exception as exc:  # pragma: no cover - defensive boundary
+        except Exception:  # pragma: no cover - defensive boundary
             yield _encode_sse(
                 "error",
-                StreamErrorPayload(message=f"Agent stream failed: {exc}").model_dump(),
+                StreamErrorPayload(message=GENERIC_STREAM_ERROR_MESSAGE).model_dump(),
             )
 
     return StreamingResponse(
@@ -86,10 +87,10 @@ async def resume_chat(
             return
         except ValueError as exc:
             yield _encode_sse("error", StreamErrorPayload(message=str(exc)).model_dump())
-        except Exception as exc:  # pragma: no cover - defensive boundary
+        except Exception:  # pragma: no cover - defensive boundary
             yield _encode_sse(
                 "error",
-                StreamErrorPayload(message=f"Agent resume failed: {exc}").model_dump(),
+                StreamErrorPayload(message=GENERIC_STREAM_ERROR_MESSAGE).model_dump(),
             )
 
     return StreamingResponse(

@@ -48,6 +48,7 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
     assert len(detail.messages[1].versions) == 1
     assert detail.messages[1].versions[0].kind == "original"
     assert detail.messages[1].can_regenerate is True
+    assert store.get_latest_persisted_result_checkpoint_id(user.id, thread_id) == "cp-result-1"
 
     assert store.upsert_speech_asset(
         user.id,
@@ -95,6 +96,7 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
     )
     assert regenerated_version_id_2 is not None
     assert isinstance(regenerated_version_id_2, str)
+    assert store.get_latest_persisted_result_checkpoint_id(user.id, thread_id) == "cp-result-3"
 
     with pytest.raises(ValueError, match="最多生成三次无法重新生成"):
         store.upsert_regenerated_version(
@@ -112,6 +114,7 @@ def test_sqlite_store_crud(tmp_path: Path) -> None:
     assert switched.text == "这是第二次重生成后的建议。"
     assert switched.current_version_id == regenerated_version_id_2
     assert len(switched.versions) == 3
+    assert store.get_latest_persisted_result_checkpoint_id(user.id, thread_id) == "cp-result-3"
 
     rated = store.update_assistant_feedback(user.id, thread_id, assistant_message_id, regenerated_version_id_2, "up")
     assert rated is not None

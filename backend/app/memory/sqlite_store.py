@@ -873,6 +873,30 @@ class ChatSQLiteStore:
         value = row["stable_checkpoint_id"]
         return str(value) if value else None
 
+    def get_latest_persisted_result_checkpoint_id(self, user_id: str, thread_id: str) -> str | None:
+        """读取最近一条已持久化 assistant 当前版本对应的结果 checkpoint。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT v.result_checkpoint_id
+                FROM chat_messages m
+                INNER JOIN chat_sessions s ON s.thread_id = m.thread_id
+                INNER JOIN assistant_message_versions v ON v.id = m.current_version_id
+                WHERE
+                  m.thread_id = ?
+                  AND s.user_id = ?
+                  AND m.role = 'assistant'
+                  AND m.current_version_id IS NOT NULL
+                ORDER BY m.created_at DESC, m.rowid DESC
+                LIMIT 1
+                """,
+                (thread_id, user_id),
+            ).fetchone()
+        if row is None:
+            return None
+        value = row["result_checkpoint_id"]
+        return str(value) if value else None
+
     def set_stable_checkpoint_id(self, user_id: str, thread_id: str, checkpoint_id: str | None) -> None:
         """更新当前用户会话的稳定 checkpoint。"""
         with self._connection() as conn:

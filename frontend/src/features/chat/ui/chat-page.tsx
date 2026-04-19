@@ -1,4 +1,4 @@
-import { CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCcw, Route, Trash2, User } from "lucide-react";
+import { CloudSun, Compass, List, MapPinned, MessageSquare, MoreHorizontal, Pencil, Plus, Route, Trash2, User } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -159,7 +159,6 @@ function ChatPageInner() {
     selectedModelProfileKey,
     selectedModelProfile,
     loading,
-    error,
     isAuthenticated,
     canStartRequest,
     sendMessage,
@@ -172,7 +171,6 @@ function ChatPageInner() {
     selectAssistantVersion,
     setAssistantFeedback,
     updateCurrentModelProfile,
-    retryLastSubmittedMessage,
     refreshCurrentThread,
   } = useChatAgent(routeThreadId);
 
@@ -651,17 +649,6 @@ function ChatPageInner() {
           />
         ))}
 
-        {error ? (
-          <div className="px-4">
-            <div className="flex items-center justify-between rounded-2xl bg-[#fff0ee] px-3 py-2 text-xs text-[#8d3b2f] shadow-sm">
-              <span className="mr-2 truncate">请求失败：{error}</span>
-              <Button variant="ghost" size="sm" onClick={() => void retryLastSubmittedMessage()}>
-                <RefreshCcw className="mr-1 h-3.5 w-3.5" />
-                重试
-              </Button>
-            </div>
-          </div>
-        ) : null}
       </section>
 
       <ChatComposer

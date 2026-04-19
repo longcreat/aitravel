@@ -876,7 +876,6 @@ export function useChatAgent(initialThreadId?: string) {
         }
 
         if (event.event === "error") {
-          setError(event.data.message);
           patchAssistantMessage((draft) => ({
             ...draft,
             text:
@@ -942,8 +941,6 @@ export function useChatAgent(initialThreadId?: string) {
         return;
       }
 
-      const message = invokeError instanceof Error ? invokeError.message : "请求失败";
-      setError(message);
       patchAssistantMessage((draft) => ({
         ...draft,
         text:
@@ -1122,7 +1119,7 @@ export function useChatAgent(initialThreadId?: string) {
           }
 
           if (event.event === "error") {
-            setError(event.data.message);
+            return;
           }
         },
       });
@@ -1134,8 +1131,6 @@ export function useChatAgent(initialThreadId?: string) {
         return;
       }
 
-      const message = regenerateError instanceof Error ? regenerateError.message : "重新生成失败";
-      setError(message);
     } finally {
       if (abortControllerRef.current === abortController) {
         abortControllerRef.current = null;

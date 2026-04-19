@@ -26,6 +26,7 @@ from app.schemas.chat import (
 )
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+GENERIC_STREAM_ERROR_MESSAGE = "请求失败，请稍后重试。"
 
 
 def _encode_sse(event: str, data: dict) -> bytes:
@@ -116,8 +117,8 @@ async def regenerate_message(
             return
         except ValueError as exc:
             yield _encode_sse("error", StreamErrorPayload(message=str(exc)).model_dump())
-        except Exception as exc:  # pragma: no cover
-            yield _encode_sse("error", StreamErrorPayload(message=f"Agent stream failed: {exc}").model_dump())
+        except Exception:  # pragma: no cover
+            yield _encode_sse("error", StreamErrorPayload(message=GENERIC_STREAM_ERROR_MESSAGE).model_dump())
 
     return StreamingResponse(
         _stream(),
