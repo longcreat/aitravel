@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import pytest
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessageChunk, ToolMessage
 from langgraph.types import Interrupt
 
 from app.agent.context import AgentRequestContext
-from app.agent.streaming import AgentStreamService, StreamRunState, _extract_interrupt_payload, _serialize_stream_part
+from app.agent.streaming import (
+    AgentStreamService,
+    StreamRunState,
+    _extract_interrupt_payload,
+    _extract_tool_events,
+    _serialize_stream_part,
+)
 
 
 class _WhitespaceChunkAgent:
@@ -103,3 +109,33 @@ def test_extract_interrupt_payload_normalizes_langgraph_interrupts() -> None:
     assert payload.question == "请问你想去哪座城市？"
     assert payload.missing_field == "destination_city"
     assert payload.suggested_replies == ["杭州", "上海"]
+
+
+def test_extract_tool_events_prefers_tool_artifact_for_payload() -> None:
+    events = list(
+        _extract_tool_events(
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            name="exa_web_search_advanced_exa",
+                            content="Exa 高级搜索找到 1 条结果。",
+                            artifact={"kind": "exa_search", "results": [{"title": "Official Guide"}]},
+                            tool_call_id="call-exa-1",
+                        )
+                    ]
+                }
+            },
+            seen_called=set(),
+            seen_returned=set(),
+        )
+    )
+
+    assert len(events) == 1
+    event_name, event_payload, trace = events[0]
+    assert event_name == "tool_returned"
+    assert event_payload == {
+        "tool_name": "exa_web_search_advanced_exa",
+        "payload": "Exa 高级搜索找到 1 条结果。",
+    }
+    assert trace.payload == {"kind": "exa_search", "results": [{"title": "Official Guide"}]}

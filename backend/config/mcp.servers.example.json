@@ -13,12 +13,5 @@
     "env": {
       "CALENDAR_API_KEY": "${CALENDAR_API_KEY}"
     }
-  },
-  "exa": {
-    "transport": "streamable_http",
-    "url": "https://mcp.exa.ai/mcp",
-    "headers": {
-      "x-api-key": "${EXA_API_KEY}"
-    }
   }
 }

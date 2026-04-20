@@ -21,6 +21,8 @@ def test_get_local_tools_includes_time_tool() -> None:
 
     assert "get_current_time" in tool_names
     assert "request_user_clarification" in tool_names
+    assert "exa_web_search_advanced_exa" in tool_names
+    assert "exa_web_fetch_exa" in tool_names
 
 
 def test_request_user_clarification_interrupts_with_normalized_payload(

@@ -55,3 +55,35 @@ def test_build_final_response_rebuilds_steps_and_reasoning() -> None:
     assert len(response.meta.step_groups) == 1
     assert response.meta.step_groups[0].items[0].tool_name == "weather lookup"
     assert response.meta.step_groups[0].items[0].status == "success"
+
+
+def test_build_final_response_prefers_tool_artifact_for_trace_payload() -> None:
+    runtime = SimpleNamespace(mcp_bundle=SimpleNamespace(connected_servers=[], errors=[]))
+    latest_values = {
+        "messages": [
+            HumanMessage(content="帮我查京都攻略"),
+            AIMessage(
+                content="我先用 Exa 搜索一下。",
+                tool_calls=[{"id": "call-exa-1", "name": "exa_web_search_advanced_exa", "args": {"query": "京都攻略"}}],
+            ),
+            ToolMessage(
+                name="exa_web_search_advanced_exa",
+                content="Exa 高级搜索找到 1 条结果。",
+                artifact={"kind": "exa_search", "results": [{"title": "Kyoto Guide"}]},
+                tool_call_id="call-exa-1",
+            ),
+            AIMessage(content="我找到一篇京都官方攻略。"),
+        ]
+    }
+
+    response = build_final_response(
+        latest_values=latest_values,
+        accumulated_chunk=None,
+        streamed_tool_traces=[],
+        runtime=runtime,
+    )
+
+    assert response.meta.tool_traces[1].payload == {
+        "kind": "exa_search",
+        "results": [{"title": "Kyoto Guide"}],
+    }

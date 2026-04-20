@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -213,13 +213,13 @@ describe("ChatMessage", () => {
             items: [
               {
                 id: "call-1",
-                tool_name: "amap mcp server maps weather",
+                tool_name: "amap-mcp-server_maps_weather",
                 status: "success",
                 summary: "Fetched weather data",
               },
               {
                 id: "call-2",
-                tool_name: "amap mcp server maps reverse geocode",
+                tool_name: "amap-mcp-server_maps_reverse_geocode",
                 status: "success",
                 summary: "Resolved current city",
               },
@@ -294,6 +294,63 @@ describe("ChatMessage", () => {
     await userEvent.click(screen.getByRole("button", { name: "open-step-summary-assistant-unknown-tool-step-unknown" }));
 
     expect(await screen.findAllByText("custom tool name")).toHaveLength(2);
+  });
+
+  it("formats object tool payload in the summary detail panel", async () => {
+    const message: ChatMessageItem = {
+      id: "assistant-exa-tool",
+      role: "assistant",
+      text: "我先帮你查一下网页资料。",
+      meta: {
+        ...emptyMeta,
+        tool_traces: [
+          {
+            phase: "called",
+            tool_name: "exa_web_search_advanced_exa",
+            payload: { query: "京都攻略", num_results: 3 },
+            tool_call_id: "call-exa-1",
+            result_status: null,
+          },
+          {
+            phase: "returned",
+            tool_name: "exa_web_search_advanced_exa",
+            payload: {
+              kind: "exa_search",
+              results: [{ title: "Kyoto Guide", url: "https://example.com/kyoto" }],
+            },
+            tool_call_id: "call-exa-1",
+            result_status: "success",
+          },
+        ],
+        step_groups: [
+          {
+            id: "step-exa",
+            items: [
+              {
+                id: "call-exa-1",
+                tool_name: "exa_web_search_advanced_exa",
+                status: "success",
+                summary: "Exa 高级搜索找到 1 条结果。",
+              },
+            ],
+          },
+        ],
+        render_segments: [{ type: "step", step_group_id: "step-exa" }],
+      },
+    };
+
+    renderWithOverlayRoot(<ChatMessage message={message} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "open-step-summary-assistant-exa-tool-step-exa" }));
+    const dialog = await screen.findByRole("dialog");
+    const toolLabel = within(dialog).getByText("Exa · 高级网络搜索");
+    const toolButton = toolLabel.closest("button");
+    expect(toolButton).not.toBeNull();
+    await userEvent.click(toolButton!);
+
+    expect(await screen.findByText(/"kind": "exa_search"/)).toBeInTheDocument();
+    expect(screen.getByText(/"title": "Kyoto Guide"/)).toBeInTheDocument();
+    expect(screen.getByText(/"query": "京都攻略"/)).toBeInTheDocument();
   });
 
   it("renders reasoning panel above the assistant answer", () => {

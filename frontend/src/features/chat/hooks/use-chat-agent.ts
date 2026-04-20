@@ -90,7 +90,21 @@ function contentToText(content: unknown): string {
   if (content == null) {
     return "";
   }
+  if (typeof content === "object") {
+    try {
+      return JSON.stringify(content);
+    } catch {
+      return String(content);
+    }
+  }
   return String(content);
+}
+
+function getToolReturnPayload(message: SerializedLangChainMessage["data"]): unknown {
+  if (message.artifact !== null && message.artifact !== undefined) {
+    return message.artifact;
+  }
+  return contentToText(message.content);
 }
 
 function contentToReasoningText(content: unknown): string {
@@ -256,6 +270,7 @@ function collectToolTraces(
       continue;
     }
     const payloadText = contentToText(message.data.content);
+    const returnedPayload = getToolReturnPayload(message.data);
     const returnedKey = String(message.data.tool_call_id ?? `${toolName}:${payloadText}`);
     if (seenReturned.has(returnedKey)) {
       continue;
@@ -264,7 +279,7 @@ function collectToolTraces(
     traces.push({
       phase: "returned",
       tool_name: toolName,
-      payload: payloadText,
+      payload: returnedPayload,
       tool_call_id: returnedKey,
       result_status: message.data.status === "error" ? "error" : "success",
     });

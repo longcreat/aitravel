@@ -4,7 +4,7 @@
 
 ## 技术栈
 
-- 后端：Python 3.12, FastAPI, LangChain `1.2.15`, LangGraph `1.1.6`, langchain-mcp-adapters `0.2.2`
+- 后端：Python 3.12, FastAPI, LangChain `1.2.15`, LangGraph `1.1.6`, langchain-mcp-adapters `0.2.2`, `httpx`
 - 前端：React + Vite + TypeScript + Tailwind + shadcn/ui 风格组件
 
 ## 官方文档基线
@@ -73,6 +73,7 @@ npm run dev
 - 可参考 `backend/config/mcp.servers.example.json`
 - 支持 `${ENV_VAR}` 注入
 - 支持 `stdio` 与 `http`（会标准化为 `streamable_http`）
+- Exa 不再通过 MCP 接入，而是作为本地 API tool 直接读取 `EXA_API_KEY`
 
 ## API
 

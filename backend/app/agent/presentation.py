@@ -231,7 +231,7 @@ def _extract_tool_traces(messages: list[BaseMessage]) -> list[ToolTrace]:
                 ToolTrace(
                     phase="returned",
                     tool_name=str(message.name or "unknown"),
-                    payload=_content_to_text(message.content),
+                    payload=_tool_message_payload(message),
                     tool_call_id=str(message.tool_call_id) if message.tool_call_id else None,
                     result_status="error" if str(getattr(message, "status", "")).lower() == "error" else "success",
                 )
@@ -324,3 +324,10 @@ def _content_to_text(content: Any) -> str:
     if content is None:
         return ""
     return str(content)
+
+
+def _tool_message_payload(message: ToolMessage) -> Any:
+    """返回工具轨迹里应保留的 payload。"""
+    if message.artifact is not None:
+        return message.artifact
+    return _content_to_text(message.content)

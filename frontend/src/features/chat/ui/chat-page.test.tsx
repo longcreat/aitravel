@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -1270,6 +1270,98 @@ describe("ChatPage", () => {
 
     const streamCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/stream"));
     expect(streamCalls).toHaveLength(1);
+  });
+
+  it("preserves tool artifact payload from SSE updates and shows structured JSON in summary", async () => {
+    setStoredAccessToken("token-exa");
+    setStoredAuthUser({
+      id: "user-exa",
+      email: "exa@example.com",
+      nickname: "exa",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const stream = createSseStream([
+      'event: messages\ndata: {"type":"messages","ns":[],"data":[{"type":"AIMessageChunk","data":{"content":"我先用 Exa 查一下京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"AIMessageChunk","name":null,"id":"chunk-exa-1","tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null,"tool_call_chunks":[],"chunk_position":null}},{"langgraph_node":"model"}]}\n\n',
+      'event: updates\ndata: {"type":"updates","ns":[],"data":{"model":{"messages":[{"type":"ai","data":{"content":"我先用 Exa 查一下京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"exa_web_search_advanced_exa","args":{"query":"京都攻略","num_results":3},"id":"call-exa-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}}]}}}\n\n',
+      'event: updates\ndata: {"type":"updates","ns":[],"data":{"tools":{"messages":[{"type":"tool","data":{"content":"Exa 高级搜索找到 1 条结果。","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"exa_web_search_advanced_exa","id":null,"tool_call_id":"call-exa-1","artifact":{"kind":"exa_search","results":[{"title":"Kyoto Guide","url":"https://example.com/kyoto"}]},"status":"success"}}]}}}\n\n',
+      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"我先用 Exa 查一下京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"exa_web_search_advanced_exa","args":{"query":"京都攻略","num_results":3},"id":"call-exa-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}},{"type":"tool","data":{"content":"Exa 高级搜索找到 1 条结果。","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"exa_web_search_advanced_exa","id":null,"tool_call_id":"call-exa-1","artifact":{"kind":"exa_search","results":[{"title":"Kyoto Guide","url":"https://example.com/kyoto"}]},"status":"success"}},{"type":"ai","data":{"content":"我找到一篇不错的京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
+    ]);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/api/auth/me") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            id: "user-exa",
+            email: "exa@example.com",
+            nickname: "exa",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/sessions") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown[]> => [],
+          text: async (): Promise<string> => "[]",
+        };
+      }
+
+      if (url.includes("/api/chat/stream") && method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          body: stream,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      return {
+        ok: false,
+        status: 404,
+        text: async (): Promise<string> => "not found",
+      };
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    renderChatPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "new-session" })).toBeInTheDocument();
+    });
+
+    const input = await screen.findByPlaceholderText("发消息或按住说话");
+    await userEvent.type(input, "帮我找一篇京都攻略");
+    await userEvent.click(screen.getByRole("button", { name: "send-message" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("我找到一篇不错的京都攻略。")).toBeInTheDocument();
+    });
+
+    const stepButtonLabel = await screen.findByText("Exa · 高级网络搜索");
+    const stepButton = stepButtonLabel.closest("button");
+    expect(stepButton).not.toBeNull();
+
+    await userEvent.click(stepButton!);
+    const dialog = await screen.findByRole("dialog");
+    const toolLabel = within(dialog).getByText("Exa · 高级网络搜索");
+    const toolButton = toolLabel.closest("button");
+    expect(toolButton).not.toBeNull();
+    await userEvent.click(toolButton!);
+
+    expect(await screen.findByText(/"kind": "exa_search"/)).toBeInTheDocument();
+    expect(screen.getByText(/"title": "Kyoto Guide"/)).toBeInTheDocument();
+    expect(screen.getByText(/"query": "京都攻略"/)).toBeInTheDocument();
   });
 
   it("keeps cached login state when /api/auth/me fails with a non-auth error", async () => {

@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Tool
 from pydantic import BaseModel
 
 from app.agent.context import AgentRequestContext
-from app.agent.presentation import _content_to_text, _iter_base_messages
+from app.agent.presentation import _content_to_text, _iter_base_messages, _tool_message_payload
 from app.agent.runtime import AgentRuntimeService
 from app.llm.provider import get_llm_configurable
 from app.schemas.chat import ChatInterruptPayload, ToolTrace
@@ -189,7 +189,7 @@ def _extract_tool_events(
         trace = ToolTrace(
             phase="returned",
             tool_name=tool_name,
-            payload=payload_text,
+            payload=_tool_message_payload(message),
             tool_call_id=str(message.tool_call_id or returned_key),
             result_status="error" if str(getattr(message, "status", "")).lower() == "error" else "success",
         )

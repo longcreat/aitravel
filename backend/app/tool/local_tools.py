@@ -12,6 +12,7 @@ from langchain.tools import ToolRuntime, tool
 from langgraph.types import interrupt
 
 from app.agent.context import AgentRequestContext
+from app.tool.exa_tools import exa_web_fetch_exa, exa_web_search_advanced_exa
 
 @tool
 def get_current_time(timezone_name: str = "Asia/Shanghai", runtime: ToolRuntime[AgentRequestContext] = None) -> dict:
@@ -87,4 +88,9 @@ def request_user_clarification(
 
 def get_local_tools() -> list:
     """返回本地工具列表。"""
-    return [get_current_time, request_user_clarification]
+    return [
+        get_current_time,
+        request_user_clarification,
+        exa_web_search_advanced_exa,
+        exa_web_fetch_exa,
+    ]
