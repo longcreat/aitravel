@@ -47,11 +47,19 @@ def _should_reset_chat_db() -> bool:
 
 def _discover_migrations() -> list[MigrationFile]:
     migrations: list[MigrationFile] = []
+    seen_versions: dict[int, str] = {}
     for path in sorted(_migrations_dir().glob("*.sql")):
         prefix, _, suffix = path.stem.partition("_")
         if not prefix.isdigit() or not suffix:
             raise RuntimeError(f"非法 migration 文件名：{path.name}")
-        migrations.append(MigrationFile(version=int(prefix), name=suffix, path=path))
+        version = int(prefix)
+        duplicate_name = seen_versions.get(version)
+        if duplicate_name is not None:
+            raise RuntimeError(
+                f"重复 migration 版本号：{version:03d}（{duplicate_name} 与 {path.name}）"
+            )
+        seen_versions[version] = path.name
+        migrations.append(MigrationFile(version=version, name=suffix, path=path))
     if not migrations:
         raise RuntimeError("未找到任何 migration SQL 文件")
     return migrations

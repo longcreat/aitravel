@@ -46,6 +46,25 @@ def test_run_sqlite_migrations_is_idempotent(tmp_path: Path) -> None:
     assert second == []
 
 
+def test_run_sqlite_migrations_rejects_duplicate_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "001_first.sql").write_text(
+        "CREATE TABLE first_table (id INTEGER PRIMARY KEY);",
+        encoding="utf-8",
+    )
+    (migrations_dir / "001_second.sql").write_text(
+        "CREATE TABLE second_table (id INTEGER PRIMARY KEY);",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.db.bootstrap._migrations_dir", lambda: migrations_dir)
+
+    with pytest.raises(RuntimeError, match="重复 migration 版本号"):
+        run_sqlite_migrations(tmp_path / "chat.db")
+
+
 def test_bootstrap_sqlite_database_reset_recreates_database(tmp_path: Path) -> None:
     db_path = tmp_path / "chat.db"
     bootstrap_sqlite_database(db_path)
