@@ -66,6 +66,8 @@ class AuthService:
         host = os.getenv("SMTP_HOST", "").strip()
         username = os.getenv("SMTP_USERNAME", "").strip()
         password = os.getenv("SMTP_PASSWORD", "").strip()
+        # docker compose env_file may pass a literal "\$" into the container for passwords containing "$".
+        password = password.replace("\\$", "$")
         from_email = os.getenv("SMTP_FROM", "").strip()
         if not all([host, username, password, from_email]):
             return None

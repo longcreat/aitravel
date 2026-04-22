@@ -1,4 +1,4 @@
-import { env } from "@/shared/config/env";
+import { resolveApiUrl } from "@/shared/config/env";
 import { getStoredAccessToken } from "@/features/auth/model/auth.storage";
 
 interface HttpOptions extends RequestInit {
@@ -20,7 +20,7 @@ export class HttpError extends Error {
 async function request<T>(endpoint: string, options: HttpOptions = {}): Promise<T> {
   const { params, headers, ...customConfig } = options;
 
-  let url = endpoint.startsWith("http") ? endpoint : `${env.apiBaseUrl}${endpoint}`;
+  let url = resolveApiUrl(endpoint);
 
   if (params) {
     const searchParams = new URLSearchParams();

@@ -13,7 +13,7 @@ import type {
   UpdateAssistantFeedbackRequest,
 } from "@/features/chat/model/chat.types";
 import { getStoredAccessToken } from "@/features/auth/model/auth.storage";
-import { env } from "@/shared/config/env";
+import { resolveApiUrl } from "@/shared/config/env";
 import { http } from "@/shared/lib/http";
 
 type StreamEventName = ChatStreamEvent["event"];
@@ -87,7 +87,7 @@ export async function listChatModelProfiles(): Promise<ListChatModelProfilesResp
 
 async function streamSse(path: string, payload: unknown, options: StreamChatOptions): Promise<void> {
   const accessToken = getStoredAccessToken();
-  const response = await fetch(`${env.apiBaseUrl}${path}`, {
+  const response = await fetch(resolveApiUrl(path), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
