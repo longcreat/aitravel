@@ -26,6 +26,7 @@ class MCPToolBundle:
     connected_servers: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     client: MultiServerMCPClient | None = None
+    clients: list[MultiServerMCPClient] = field(default_factory=list)
 
 
 async def load_mcp_tools(connections: dict[str, dict[str, Any]]) -> MCPToolBundle:
@@ -40,20 +41,28 @@ async def load_mcp_tools(connections: dict[str, dict[str, Any]]) -> MCPToolBundl
     if not connections:
         return MCPToolBundle()
 
-    client = MultiServerMCPClient(connections=connections, tool_name_prefix=True)
-    try:
-        tools = await client.get_tools()
-        return MCPToolBundle(
-            tools=list(tools),
-            connected_servers=list(connections.keys()),
-            errors=[],
-            client=client,
-        )
-    except Exception as exc:  # pragma: no cover - defensive fallback path
-        logger.exception("Failed to initialize MCP connections")
-        return MCPToolBundle(
-            tools=[],
-            connected_servers=[],
-            errors=[str(exc)],
-            client=client,
-        )
+    tools: list[Any] = []
+    connected_servers: list[str] = []
+    errors: list[str] = []
+    clients: list[MultiServerMCPClient] = []
+
+    for server_name, connection in connections.items():
+        client = MultiServerMCPClient(connections={server_name: connection}, tool_name_prefix=True)
+        clients.append(client)
+        try:
+            loaded_tools = await client.get_tools()
+        except Exception as exc:  # pragma: no cover - defensive fallback path
+            logger.exception("Failed to initialize MCP server %s", server_name)
+            errors.append(f"{server_name}: {exc}")
+            continue
+
+        tools.extend(loaded_tools)
+        connected_servers.append(server_name)
+
+    return MCPToolBundle(
+        tools=tools,
+        connected_servers=connected_servers,
+        errors=errors,
+        client=clients[0] if clients else None,
+        clients=clients,
+    )

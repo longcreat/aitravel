@@ -28,28 +28,6 @@ class ChatInvokeRequest(BaseModel):
     session_meta: dict[str, Any] = Field(default_factory=dict)
 
 
-class ChatResumeRequest(BaseModel):
-    """恢复被 interrupt 暂停的聊天请求。"""
-
-    thread_id: str = Field(min_length=1)
-    interrupt_id: str = Field(min_length=1)
-    answer: str = Field(min_length=1, max_length=4000)
-    locale: str = Field(default="zh-CN")
-    model_profile_key: str | None = None
-    session_meta: dict[str, Any] = Field(default_factory=dict)
-
-
-class ChatInterruptPayload(BaseModel):
-    """前端可消费的 interrupt 负载。"""
-
-    kind: Literal["clarification"] = "clarification"
-    interrupt_id: str = Field(min_length=1)
-    question: str = Field(min_length=1)
-    missing_field: str | None = None
-    suggested_replies: list[str] = Field(default_factory=list)
-    allow_custom_input: bool = True
-
-
 class ToolTrace(BaseModel):
     """工具调用轨迹条目。"""
 
@@ -60,49 +38,48 @@ class ToolTrace(BaseModel):
     result_status: Literal["success", "error"] | None = None
 
 
-class StepDetailItem(BaseModel):
-    """单条工具步骤详情。"""
-
-    id: str
-    tool_name: str
-    status: Literal["running", "success", "error"]
-    summary: str
-
-
-class StepGroup(BaseModel):
-    """连续工具调用区间的聚合结果。"""
-
-    id: str
-    items: list[StepDetailItem] = Field(default_factory=list)
-
-
-class RenderTextSegment(BaseModel):
-    """正文文本片段。"""
-
-    type: Literal["text"] = "text"
-    text: str
-
-
-class RenderStepSegment(BaseModel):
-    """step 入口片段。"""
-
-    type: Literal["step"] = "step"
-    step_group_id: str
-
-
-ChatRenderSegment = RenderTextSegment | RenderStepSegment
-
-
 class ChatMetaInfo(BaseModel):
     """聊天附加元信息集合。"""
 
     tool_traces: list[ToolTrace] = Field(default_factory=list)
-    step_groups: list[StepGroup] = Field(default_factory=list)
-    render_segments: list[ChatRenderSegment] = Field(default_factory=list)
     reasoning_text: str | None = None
     reasoning_state: Literal["streaming", "completed"] | None = None
     mcp_connected_servers: list[str] = Field(default_factory=list)
     mcp_errors: list[str] = Field(default_factory=list)
+
+
+class ChatTextPart(BaseModel):
+    """前端可直接渲染的文本片段。"""
+
+    id: str
+    type: Literal["text"] = "text"
+    text: str = ""
+    status: Literal["streaming", "completed", "stopped", "failed"] = "completed"
+
+
+class ChatReasoningPart(BaseModel):
+    """前端可直接渲染的思考片段。"""
+
+    id: str
+    type: Literal["reasoning"] = "reasoning"
+    text: str = ""
+    status: Literal["streaming", "completed", "stopped", "failed"] = "completed"
+
+
+class ChatToolPart(BaseModel):
+    """前端可直接渲染的工具调用片段。"""
+
+    id: str
+    type: Literal["tool"] = "tool"
+    tool_call_id: str
+    tool_name: str
+    input: Any = None
+    output: Any = None
+    status: Literal["running", "success", "error"] = "running"
+
+
+ChatMessagePart = ChatTextPart | ChatReasoningPart | ChatToolPart
+ChatMessageStatus = Literal["streaming", "completed", "stopped", "failed"]
 
 
 class AssistantVersion(BaseModel):
@@ -112,6 +89,8 @@ class AssistantVersion(BaseModel):
     version_index: Literal[1, 2, 3]
     kind: Literal["original", "regenerated"]
     text: str
+    parts: list[ChatMessagePart] = Field(default_factory=list)
+    status: ChatMessageStatus = "completed"
     meta: ChatMetaInfo | None = None
     feedback: Literal["up", "down"] | None = None
     speech_status: Literal["generating", "ready", "failed"] | None = None
@@ -138,12 +117,53 @@ class PersistedChatMessage(BaseModel):
     id: str
     role: Literal["user", "assistant"]
     text: str
+    parts: list[ChatMessagePart] = Field(default_factory=list)
+    status: ChatMessageStatus = "completed"
     meta: ChatMetaInfo | None = None
     reply_to_message_id: str | None = None
     current_version_id: str | None = None
     versions: list[AssistantVersion] = Field(default_factory=list)
     can_regenerate: bool = False
     created_at: str
+
+
+class TurnStartPayload(BaseModel):
+    """一次聊天回合开始时的稳定消息身份。"""
+
+    thread_id: str
+    user_message: PersistedChatMessage | None = None
+    assistant_message: PersistedChatMessage
+
+
+class PartDeltaPayload(BaseModel):
+    """文本/思考 part 增量。"""
+
+    message_id: str
+    version_id: str
+    part_id: str
+    part_type: Literal["text", "reasoning"]
+    text_delta: str
+    status: Literal["streaming", "completed", "stopped", "failed"] = "streaming"
+
+
+class ToolPartPayload(BaseModel):
+    """工具 part 状态变更。"""
+
+    message_id: str
+    version_id: str
+    part: ChatToolPart
+
+
+class MessageCompletedPayload(BaseModel):
+    """助手消息完成后的稳定展示态。"""
+
+    message: PersistedChatMessage
+
+
+class TurnDonePayload(BaseModel):
+    """一次聊天回合结束。"""
+
+    thread_id: str
 
 
 class SessionSummary(BaseModel):

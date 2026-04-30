@@ -152,7 +152,6 @@ function ChatPageInner() {
   const {
     threadId,
     messages,
-    pendingInterrupt,
     sessions,
     sessionsReady,
     modelProfiles,
@@ -333,10 +332,6 @@ function ChatPageInner() {
     }
 
     await sendMessage(buildQuickPrompt(kind));
-  }
-
-  async function handleSelectClarificationReply(_messageId: string, reply: string) {
-    await sendMessage(reply);
   }
 
   async function handleToggleSpeech(messageId: string, versionId: string) {
@@ -644,7 +639,6 @@ function ChatPageInner() {
             onSwitchVersion={handleSelectAssistantVersion}
             onFeedback={setAssistantFeedback}
             onToggleSpeech={handleToggleSpeech}
-            onSelectClarificationReply={handleSelectClarificationReply}
             isSpeechPlaying={playingSpeechKey === getSpeechMessageKey(message)}
           />
         ))}
@@ -655,7 +649,6 @@ function ChatPageInner() {
         loading={loading}
         ready={authReady}
         modelProfileLabel={selectedModelProfileLabel}
-        placeholder={pendingInterrupt ? "补充一下上面缺失的信息，我会继续帮你完成这次请求" : undefined}
         onSend={sendMessage}
         onOpenModelProfileSheet={() => setModelProfileSheetOpen(true)}
         onStop={stopGenerating}

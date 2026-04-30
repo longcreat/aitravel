@@ -4,7 +4,6 @@
  */
 const localToolRegistry: Record<string, string> = {
   get_current_time: "获取当前时间",
-  request_user_clarification: "补充信息",
 };
 
 /**

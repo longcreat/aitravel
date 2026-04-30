@@ -10,7 +10,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from app.schemas.chat import AssistantVersion, ChatMetaInfo, PersistedChatMessage, SessionDetail, SessionSummary
+from pydantic import TypeAdapter
+
+from app.schemas.chat import (
+    AssistantVersion,
+    ChatMessagePart,
+    ChatMetaInfo,
+    PersistedChatMessage,
+    SessionDetail,
+    SessionSummary,
+)
+
+
+_CHAT_MESSAGE_PART_ADAPTER = TypeAdapter(ChatMessagePart)
 
 
 @dataclass
@@ -34,6 +46,8 @@ class StoredAssistantMessageVersion:
     version_index: int
     kind: str
     text: str
+    parts: list[ChatMessagePart]
+    status: str
     meta: ChatMetaInfo | None
     feedback: str | None
     parent_checkpoint_id: str | None
@@ -82,6 +96,28 @@ def _preview(text: str, max_len: int = 80) -> str:
     if len(normalized) <= max_len:
         return normalized
     return f"{normalized[:max_len]}..."
+
+
+def _dump_parts(parts: list[ChatMessagePart] | list[dict] | None) -> str:
+    """序列化 UI parts。"""
+    if not parts:
+        return "[]"
+    payload: list[dict] = []
+    for part in parts:
+        if hasattr(part, "model_dump"):
+            payload.append(part.model_dump())  # type: ignore[union-attr]
+        else:
+            payload.append(dict(part))
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _dump_meta(meta: ChatMetaInfo | dict[str, object] | None) -> str | None:
+    """序列化消息 meta。"""
+    if meta is None:
+        return None
+    if hasattr(meta, "model_dump"):
+        return json.dumps(meta.model_dump(exclude_none=True), ensure_ascii=False)  # type: ignore[union-attr]
+    return json.dumps(meta, ensure_ascii=False)
 
 
 class ChatSQLiteStore:
@@ -178,37 +214,44 @@ class ChatSQLiteStore:
             conn.execute(
                 """
                 INSERT INTO chat_messages (
-                  id, thread_id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
-                ) VALUES (?, ?, 'user', ?, NULL, NULL, NULL, ?)
+                  id, thread_id, role, text, parts_json, status, meta_json, reply_to_message_id, current_version_id, created_at
+                ) VALUES (?, ?, 'user', ?, ?, 'completed', NULL, NULL, NULL, ?)
                 """,
-                (message_id, thread_id, text, now),
+                (message_id, thread_id, text, _dump_parts([{"id": f"{message_id}-text", "type": "text", "text": text, "status": "completed"}]), now),
             )
         return message_id
 
-    def append_assistant_message(
+    def begin_assistant_message(
         self,
         user_id: str,
         thread_id: str,
-        text: str,
         *,
-        meta: dict[str, object],
         reply_to_message_id: str,
         parent_checkpoint_id: str | None,
-        result_checkpoint_id: str | None,
-    ) -> tuple[str, str]:
-        """写入助手消息并更新会话活跃时间。"""
+    ) -> PersistedChatMessage:
+        """创建一个流式中的 assistant 消息和原始版本。"""
         now = _utc_now_iso()
         assistant_message_id = _new_chat_entity_id()
         version_id = _new_chat_entity_id()
-        meta_json = json.dumps(meta, ensure_ascii=False)
         with self._connection() as conn:
+            owner = conn.execute(
+                """
+                SELECT 1
+                FROM chat_sessions
+                WHERE thread_id = ? AND user_id = ?
+                """,
+                (thread_id, user_id),
+            ).fetchone()
+            if owner is None:
+                raise ValueError("Session not found")
+
             conn.execute(
                 """
                 INSERT INTO chat_messages (
-                  id, thread_id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
-                ) VALUES (?, ?, 'assistant', ?, ?, ?, NULL, ?)
+                  id, thread_id, role, text, parts_json, status, meta_json, reply_to_message_id, current_version_id, created_at
+                ) VALUES (?, ?, 'assistant', '', '[]', 'streaming', NULL, ?, ?, ?)
                 """,
-                (assistant_message_id, thread_id, text, meta_json, reply_to_message_id, now),
+                (assistant_message_id, thread_id, reply_to_message_id, version_id, now),
             )
             conn.execute(
                 """
@@ -218,17 +261,73 @@ class ChatSQLiteStore:
                   version_index,
                   kind,
                   text,
+                  parts_json,
+                  status,
                   meta_json,
                   feedback,
                   parent_checkpoint_id,
                   result_checkpoint_id,
                   created_at
-                ) VALUES (?, ?, 1, 'original', ?, ?, NULL, ?, ?, ?)
+                ) VALUES (?, ?, 1, 'original', '', '[]', 'streaming', NULL, NULL, ?, NULL, ?)
+                """,
+                (version_id, assistant_message_id, parent_checkpoint_id, now),
+            )
+        message = self.get_message(user_id, thread_id, assistant_message_id)
+        if message is None:
+            raise RuntimeError("Failed to load assistant placeholder")
+        return message
+
+    def append_assistant_message(
+        self,
+        user_id: str,
+        thread_id: str,
+        text: str,
+        *,
+        meta: ChatMetaInfo | dict[str, object],
+        parts: list[ChatMessagePart] | list[dict] | None = None,
+        status: str = "completed",
+        reply_to_message_id: str,
+        parent_checkpoint_id: str | None,
+        result_checkpoint_id: str | None,
+    ) -> tuple[str, str]:
+        """写入助手消息并更新会话活跃时间。"""
+        now = _utc_now_iso()
+        assistant_message_id = _new_chat_entity_id()
+        version_id = _new_chat_entity_id()
+        meta_json = _dump_meta(meta)
+        parts_json = _dump_parts(parts)
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_messages (
+                  id, thread_id, role, text, parts_json, status, meta_json, reply_to_message_id, current_version_id, created_at
+                ) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (assistant_message_id, thread_id, text, parts_json, status, meta_json, reply_to_message_id, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO assistant_message_versions (
+                  id,
+                  assistant_message_id,
+                  version_index,
+                  kind,
+                  text,
+                  parts_json,
+                  status,
+                  meta_json,
+                  feedback,
+                  parent_checkpoint_id,
+                  result_checkpoint_id,
+                  created_at
+                ) VALUES (?, ?, 1, 'original', ?, ?, ?, ?, NULL, ?, ?, ?)
                 """,
                 (
                     version_id,
                     assistant_message_id,
                     text,
+                    parts_json,
+                    status,
                     meta_json,
                     parent_checkpoint_id,
                     result_checkpoint_id,
@@ -253,10 +352,159 @@ class ChatSQLiteStore:
             )
         return assistant_message_id, version_id
 
+    def complete_assistant_message(
+        self,
+        user_id: str,
+        thread_id: str,
+        assistant_message_id: str,
+        version_id: str,
+        *,
+        text: str,
+        parts: list[ChatMessagePart] | list[dict],
+        meta: ChatMetaInfo | dict[str, object],
+        result_checkpoint_id: str | None,
+        status: str = "completed",
+    ) -> PersistedChatMessage | None:
+        """完成正在流式输出的 assistant 消息。"""
+        now = _utc_now_iso()
+        meta_json = _dump_meta(meta)
+        parts_json = _dump_parts(parts)
+        with self._connection() as conn:
+            owner = conn.execute(
+                """
+                SELECT 1
+                FROM chat_sessions
+                WHERE thread_id = ? AND user_id = ?
+                """,
+                (thread_id, user_id),
+            ).fetchone()
+            if owner is None:
+                return None
+
+            conn.execute(
+                """
+                UPDATE assistant_message_versions
+                SET text = ?, parts_json = ?, status = ?, meta_json = ?, result_checkpoint_id = ?
+                WHERE id = ? AND assistant_message_id = ?
+                """,
+                (text, parts_json, status, meta_json, result_checkpoint_id, version_id, assistant_message_id),
+            )
+            conn.execute(
+                """
+                UPDATE chat_messages
+                SET text = ?, parts_json = ?, status = ?, meta_json = ?, current_version_id = ?
+                WHERE id = ? AND thread_id = ?
+                """,
+                (text, parts_json, status, meta_json, version_id, assistant_message_id, thread_id),
+            )
+            conn.execute(
+                """
+                UPDATE chat_sessions
+                SET updated_at = ?, last_message_preview = ?
+                WHERE thread_id = ? AND user_id = ?
+                """,
+                (now, _preview(text), thread_id, user_id),
+            )
+        return self.get_message(user_id, thread_id, assistant_message_id)
+
+    def update_assistant_message_meta(
+        self,
+        user_id: str,
+        thread_id: str,
+        assistant_message_id: str,
+        version_id: str,
+        *,
+        meta: ChatMetaInfo | dict[str, object] | None,
+    ) -> PersistedChatMessage | None:
+        """更新 assistant 消息当前版本的 meta。"""
+        meta_json = _dump_meta(meta)
+        with self._connection() as conn:
+            owner = conn.execute(
+                """
+                SELECT current_version_id
+                FROM chat_messages m
+                INNER JOIN chat_sessions s ON s.thread_id = m.thread_id
+                WHERE m.id = ? AND m.thread_id = ? AND s.user_id = ?
+                """,
+                (assistant_message_id, thread_id, user_id),
+            ).fetchone()
+            if owner is None:
+                return None
+
+            conn.execute(
+                """
+                UPDATE assistant_message_versions
+                SET meta_json = ?
+                WHERE id = ? AND assistant_message_id = ?
+                """,
+                (meta_json, version_id, assistant_message_id),
+            )
+            if str(owner["current_version_id"] or "") == version_id:
+                conn.execute(
+                    """
+                    UPDATE chat_messages
+                    SET meta_json = ?
+                    WHERE id = ? AND thread_id = ?
+                    """,
+                    (meta_json, assistant_message_id, thread_id),
+                )
+        return self.get_message(user_id, thread_id, assistant_message_id)
+
+    def _refresh_session_preview(self, conn: sqlite3.Connection, user_id: str, thread_id: str) -> None:
+        row = conn.execute(
+            """
+            SELECT text
+            FROM chat_messages
+            WHERE thread_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (thread_id,),
+        ).fetchone()
+        preview = _preview(str(row["text"])) if row and row["text"] else ""
+        conn.execute(
+            """
+            UPDATE chat_sessions
+            SET updated_at = ?, last_message_preview = ?
+            WHERE thread_id = ? AND user_id = ?
+            """,
+            (_utc_now_iso(), preview, thread_id, user_id),
+        )
+
+    def delete_messages(self, user_id: str, thread_id: str, message_ids: list[str]) -> None:
+        """删除指定消息，并回刷会话预览。"""
+        targets = [message_id for message_id in message_ids if message_id]
+        if not targets:
+            return
+
+        placeholders = ", ".join("?" for _ in targets)
+        with self._connection() as conn:
+            owner = conn.execute(
+                """
+                SELECT 1
+                FROM chat_sessions
+                WHERE thread_id = ? AND user_id = ?
+                """,
+                (thread_id, user_id),
+            ).fetchone()
+            if owner is None:
+                return
+
+            conn.execute(
+                f"DELETE FROM chat_messages WHERE thread_id = ? AND id IN ({placeholders})",
+                (thread_id, *targets),
+            )
+            self._refresh_session_preview(conn, user_id, thread_id)
+
     def _parse_meta_payload(self, meta_payload: str | None) -> ChatMetaInfo | None:
         if not meta_payload:
             return None
         return ChatMetaInfo.model_validate(json.loads(meta_payload))
+
+    def _parse_parts_payload(self, parts_payload: str | None) -> list[ChatMessagePart]:
+        if not parts_payload:
+            return []
+        return [_CHAT_MESSAGE_PART_ADAPTER.validate_python(item) for item in json.loads(parts_payload)]
 
     def _load_speech_assets_by_version_id(
         self, conn: sqlite3.Connection, thread_id: str
@@ -304,6 +552,8 @@ class ChatSQLiteStore:
               v.version_index,
               v.kind,
               v.text,
+              v.parts_json,
+              v.status,
               v.meta_json,
               v.feedback,
               v.parent_checkpoint_id,
@@ -327,6 +577,8 @@ class ChatSQLiteStore:
                 version_index=int(row["version_index"]),
                 kind=str(row["kind"]),
                 text=str(row["text"]),
+                parts=self._parse_parts_payload(row["parts_json"]),
+                status=str(row["status"] or "completed"),
                 meta=self._parse_meta_payload(row["meta_json"]),
                 feedback=str(row["feedback"]) if row["feedback"] else None,
                 parent_checkpoint_id=str(row["parent_checkpoint_id"]) if row["parent_checkpoint_id"] else None,
@@ -378,7 +630,7 @@ class ChatSQLiteStore:
 
             message_rows = conn.execute(
                 """
-                SELECT id, role, text, meta_json, reply_to_message_id, current_version_id, created_at
+                SELECT id, role, text, parts_json, status, meta_json, reply_to_message_id, current_version_id, created_at
                 FROM chat_messages
                 WHERE thread_id = ?
                 ORDER BY created_at ASC, rowid ASC
@@ -401,6 +653,8 @@ class ChatSQLiteStore:
                     version_index=version.version_index,  # type: ignore[arg-type]
                     kind=version.kind,  # type: ignore[arg-type]
                     text=version.text,
+                    parts=version.parts,
+                    status=version.status,  # type: ignore[arg-type]
                     meta=version.meta,
                     feedback=version.feedback,  # type: ignore[arg-type]
                     speech_status=version.speech_status,  # type: ignore[arg-type]
@@ -410,7 +664,7 @@ class ChatSQLiteStore:
                 for version in versions_by_message_id.get(message_id, [])
             ]
             has_regenerable_original_version = any(
-                version.version_index == 1 and bool(version.parent_checkpoint_id)
+                version.version_index == 1 and version.status == "completed"
                 for version in versions_by_message_id.get(message_id, [])
             )
             messages.append(
@@ -418,6 +672,8 @@ class ChatSQLiteStore:
                     id=message_id,
                     role=role,  # type: ignore[arg-type]
                     text=str(row["text"]),
+                    parts=self._parse_parts_payload(row["parts_json"]),
+                    status=str(row["status"] or "completed"),  # type: ignore[arg-type]
                     meta=self._parse_meta_payload(row["meta_json"]),
                     reply_to_message_id=str(row["reply_to_message_id"]) if row["reply_to_message_id"] else None,
                     current_version_id=str(row["current_version_id"]) if row["current_version_id"] else None,
@@ -437,6 +693,13 @@ class ChatSQLiteStore:
             model_profile_key=str(session_row["model_profile_key"] or "standard"),
             messages=messages,
         )
+
+    def get_message(self, user_id: str, thread_id: str, message_id: str) -> PersistedChatMessage | None:
+        """读取会话中的单条消息。"""
+        detail = self.get_session_detail(user_id, thread_id)
+        if detail is None:
+            return None
+        return next((message for message in detail.messages if message.id == message_id), None)
 
     def get_session_model_profile_key(self, user_id: str, thread_id: str) -> str | None:
         """读取当前用户会话绑定的模型档位。"""
@@ -563,9 +826,6 @@ class ChatSQLiteStore:
             if row["original_parent_checkpoint_id"]
             else None
         )
-        if original_parent_checkpoint_id is None:
-            return None
-
         return AssistantMessageRegenerationTarget(
             message_id=str(row["id"]),
             reply_to_message_id=str(row["reply_to_message_id"]),
@@ -582,14 +842,17 @@ class ChatSQLiteStore:
         assistant_message_id: str,
         *,
         text: str,
-        meta: dict[str, object],
+        meta: ChatMetaInfo | dict[str, object],
+        parts: list[ChatMessagePart] | list[dict] | None = None,
+        status: str = "completed",
         parent_checkpoint_id: str | None,
         result_checkpoint_id: str | None,
     ) -> str | None:
         """写入新的重生版本并切到该版本。最多保留 3 个版本（原始版 + 2 次重生）。"""
         now = _utc_now_iso()
         version_id = _new_chat_entity_id()
-        meta_json = json.dumps(meta, ensure_ascii=False)
+        meta_json = _dump_meta(meta)
+        parts_json = _dump_parts(parts)
         with self._connection() as conn:
             owner = conn.execute(
                 """
@@ -622,18 +885,22 @@ class ChatSQLiteStore:
                   version_index,
                   kind,
                   text,
+                  parts_json,
+                  status,
                   meta_json,
                   feedback,
                   parent_checkpoint_id,
                   result_checkpoint_id,
                   created_at
-                ) VALUES (?, ?, ?, 'regenerated', ?, ?, NULL, ?, ?, ?)
+                ) VALUES (?, ?, ?, 'regenerated', ?, ?, ?, ?, NULL, ?, ?, ?)
                 """,
                 (
                     version_id,
                     assistant_message_id,
                     next_version_index,
                     text,
+                    parts_json,
+                    status,
                     meta_json,
                     parent_checkpoint_id,
                     result_checkpoint_id,
@@ -644,10 +911,10 @@ class ChatSQLiteStore:
             conn.execute(
                 """
                 UPDATE chat_messages
-                SET text = ?, meta_json = ?, current_version_id = ?
+                SET text = ?, parts_json = ?, status = ?, meta_json = ?, current_version_id = ?
                 WHERE id = ? AND thread_id = ?
                 """,
-                (text, meta_json, version_id, assistant_message_id, thread_id),
+                (text, parts_json, status, meta_json, version_id, assistant_message_id, thread_id),
             )
             conn.execute(
                 """
@@ -658,6 +925,126 @@ class ChatSQLiteStore:
                 (now, _preview(text), result_checkpoint_id, thread_id, user_id),
             )
         return version_id
+
+    def begin_regenerated_version(
+        self,
+        user_id: str,
+        thread_id: str,
+        assistant_message_id: str,
+        *,
+        parent_checkpoint_id: str | None,
+    ) -> str | None:
+        """创建一个流式中的重生成版本并切到该版本。"""
+        now = _utc_now_iso()
+        version_id = _new_chat_entity_id()
+        with self._connection() as conn:
+            owner = conn.execute(
+                """
+                SELECT 1
+                FROM chat_sessions
+                WHERE thread_id = ? AND user_id = ?
+                """,
+                (thread_id, user_id),
+            ).fetchone()
+            if owner is None:
+                return None
+
+            max_row = conn.execute(
+                """
+                SELECT MAX(version_index) AS max_idx
+                FROM assistant_message_versions
+                WHERE assistant_message_id = ?
+                """,
+                (assistant_message_id,),
+            ).fetchone()
+            next_version_index = (max_row["max_idx"] or 1) + 1
+            if next_version_index > self.MAX_ASSISTANT_VERSIONS:
+                raise ValueError("最多生成三次无法重新生成")
+
+            conn.execute(
+                """
+                INSERT INTO assistant_message_versions (
+                  id,
+                  assistant_message_id,
+                  version_index,
+                  kind,
+                  text,
+                  parts_json,
+                  status,
+                  meta_json,
+                  feedback,
+                  parent_checkpoint_id,
+                  result_checkpoint_id,
+                  created_at
+                ) VALUES (?, ?, ?, 'regenerated', '', '[]', 'streaming', NULL, NULL, ?, NULL, ?)
+                """,
+                (version_id, assistant_message_id, next_version_index, parent_checkpoint_id, now),
+            )
+            conn.execute(
+                """
+                UPDATE chat_messages
+                SET text = '', parts_json = '[]', status = 'streaming', meta_json = NULL, current_version_id = ?
+                WHERE id = ? AND thread_id = ?
+                """,
+                (version_id, assistant_message_id, thread_id),
+            )
+        return version_id
+
+    def discard_assistant_version(
+        self,
+        user_id: str,
+        thread_id: str,
+        assistant_message_id: str,
+        version_id: str,
+        fallback_version_id: str | None,
+    ) -> None:
+        """丢弃失败的流式版本，并恢复到上一稳定版本。"""
+        with self._connection() as conn:
+            owner = conn.execute(
+                """
+                SELECT 1
+                FROM chat_sessions
+                WHERE thread_id = ? AND user_id = ?
+                """,
+                (thread_id, user_id),
+            ).fetchone()
+            if owner is None:
+                return
+            conn.execute(
+                """
+                DELETE FROM assistant_message_versions
+                WHERE id = ? AND assistant_message_id = ?
+                """,
+                (version_id, assistant_message_id),
+            )
+            if fallback_version_id is None:
+                return
+            fallback = conn.execute(
+                """
+                SELECT text, parts_json, status, meta_json
+                FROM assistant_message_versions
+                WHERE id = ? AND assistant_message_id = ?
+                """,
+                (fallback_version_id, assistant_message_id),
+            ).fetchone()
+            if fallback is None:
+                return
+            conn.execute(
+                """
+                UPDATE chat_messages
+                SET text = ?, parts_json = ?, status = ?, meta_json = ?, current_version_id = ?
+                WHERE id = ? AND thread_id = ?
+                """,
+                (
+                    str(fallback["text"]),
+                    str(fallback["parts_json"] or "[]"),
+                    str(fallback["status"] or "completed"),
+                    str(fallback["meta_json"]) if fallback["meta_json"] else None,
+                    fallback_version_id,
+                    assistant_message_id,
+                    thread_id,
+                ),
+            )
 
     def switch_assistant_version(
         self, user_id: str, thread_id: str, assistant_message_id: str, version_id: str
@@ -682,6 +1069,8 @@ class ChatSQLiteStore:
                 SELECT
                   v.id,
                   v.text,
+                  v.parts_json,
+                  v.status,
                   v.meta_json,
                   v.result_checkpoint_id
                 FROM assistant_message_versions v
@@ -702,10 +1091,18 @@ class ChatSQLiteStore:
             conn.execute(
                 """
                 UPDATE chat_messages
-                SET text = ?, meta_json = ?, current_version_id = ?
+                SET text = ?, parts_json = ?, status = ?, meta_json = ?, current_version_id = ?
                 WHERE id = ? AND thread_id = ?
                 """,
-                (str(version_row["text"]), meta_json, version_id, assistant_message_id, thread_id),
+                (
+                    str(version_row["text"]),
+                    str(version_row["parts_json"] or "[]"),
+                    str(version_row["status"] or "completed"),
+                    meta_json,
+                    version_id,
+                    assistant_message_id,
+                    thread_id,
+                ),
             )
             conn.execute(
                 """

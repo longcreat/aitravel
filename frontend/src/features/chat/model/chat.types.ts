@@ -1,51 +1,42 @@
-export interface ToolTrace {
-  phase: "called" | "returned";
-  tool_name: string;
-  payload: unknown;
-  tool_call_id?: string | null;
-  result_status?: "success" | "error" | null;
-}
-
-export interface StepDetailItem {
-  id: string;
-  tool_name: string;
-  status: "running" | "success" | "error";
-  summary: string;
-}
-
-export interface StepGroup {
-  id: string;
-  items: StepDetailItem[];
-}
-
-export type ChatRenderSegment =
-  | {
-      type: "text";
-      text: string;
-    }
-  | {
-      type: "step";
-      step_group_id: string;
-    };
-
 export interface ChatMetaInfo {
-  tool_traces: ToolTrace[];
-  step_groups: StepGroup[];
-  render_segments: ChatRenderSegment[];
-  reasoning_text?: string | null;
-  reasoning_state?: "streaming" | "completed" | null;
   mcp_connected_servers: string[];
   mcp_errors: string[];
 }
 
 export type AssistantVersionFeedback = "up" | "down" | null;
 export type AssistantVersionSpeechStatus = "generating" | "ready" | "failed" | null;
+export type ChatMessageStatus = "streaming" | "completed" | "stopped" | "failed";
+
+export type ChatMessagePart =
+  | {
+      id: string;
+      type: "text";
+      text: string;
+      status: ChatMessageStatus;
+    }
+  | {
+      id: string;
+      type: "reasoning";
+      text: string;
+      status: ChatMessageStatus;
+    }
+  | {
+      id: string;
+      type: "tool";
+      tool_call_id: string;
+      tool_name: string;
+      input?: unknown;
+      output?: unknown;
+      status: "running" | "success" | "error";
+    };
 
 export interface AssistantMessageVersion {
   id: string;
   version_index: 1 | 2 | 3;
   kind: "original" | "regenerated";
   text: string;
+  parts?: ChatMessagePart[];
+  status?: ChatMessageStatus;
   meta: ChatMetaInfo | null;
   feedback: AssistantVersionFeedback;
   speech_status: AssistantVersionSpeechStatus;
@@ -61,69 +52,45 @@ export interface ChatInvokeRequest {
   session_meta: Record<string, unknown>;
 }
 
-export interface ChatResumeRequest {
-  thread_id: string;
-  interrupt_id: string;
-  answer: string;
-  locale: string;
-  model_profile_key?: string | null;
-  session_meta: Record<string, unknown>;
-}
-
-export interface ChatInterruptPayload {
-  kind: "clarification";
-  interrupt_id: string;
-  question: string;
-  missing_field?: string | null;
-  suggested_replies: string[];
-  allow_custom_input: boolean;
-}
-
-export interface ChatFinalPayload {
-  assistant_message: string;
-  meta: ChatMetaInfo;
-}
-
-export interface SerializedLangChainMessage {
-  type: string;
-  data: {
-    content?: unknown;
-    additional_kwargs?: Record<string, unknown>;
-    response_metadata?: Record<string, unknown>;
-    type?: string | null;
-    name?: string | null;
-    id?: string | null;
-    tool_calls?: Array<{
-      name?: string;
-      args?: unknown;
-      id?: string;
-      type?: string;
-    }>;
-    invalid_tool_calls?: unknown[];
-    usage_metadata?: unknown;
-    tool_call_chunks?: unknown[];
-    chunk_position?: unknown;
-    tool_call_id?: string;
-    artifact?: unknown;
-    status?: string;
-  };
-}
-
-export interface LangGraphStreamPart {
-  type: "messages" | "updates" | "values" | string;
-  ns: string[];
-  data: unknown;
-  interrupts?: unknown;
-}
-
 export type ChatStreamEvent =
   | {
-      event: "messages" | "updates" | "values";
-      data: LangGraphStreamPart;
+      event: "turn.start";
+      data: {
+        thread_id: string;
+        user_message?: PersistedChatMessage | null;
+        assistant_message: PersistedChatMessage;
+      };
     }
   | {
-      event: "interrupt";
-      data: ChatInterruptPayload;
+      event: "part.delta";
+      data: {
+        message_id: string;
+        version_id: string;
+        part_id: string;
+        part_type: "text" | "reasoning";
+        text_delta: string;
+        status: ChatMessageStatus;
+      };
+    }
+  | {
+      event: "tool.start" | "tool.done";
+      data: {
+        message_id: string;
+        version_id: string;
+        part: Extract<ChatMessagePart, { type: "tool" }>;
+      };
+    }
+  | {
+      event: "message.completed";
+      data: {
+        message: PersistedChatMessage;
+      };
+    }
+  | {
+      event: "turn.done";
+      data: {
+        thread_id: string;
+      };
     }
   | {
       event: "error";
@@ -138,8 +105,8 @@ export interface ChatMessageItem {
   id: string;
   role: ChatRole;
   text: string;
-  status?: "streaming" | "stopped";
-  interrupt?: ChatInterruptPayload;
+  parts?: ChatMessagePart[];
+  status?: ChatMessageStatus;
   meta?: ChatMetaInfo;
   current_version_id?: string | null;
   versions?: AssistantMessageVersion[];
@@ -150,6 +117,8 @@ export interface PersistedChatMessage {
   id: string;
   role: ChatRole;
   text: string;
+  parts: ChatMessagePart[];
+  status: ChatMessageStatus;
   meta: ChatMetaInfo | null;
   reply_to_message_id?: string | null;
   current_version_id?: string | null;

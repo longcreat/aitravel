@@ -44,10 +44,7 @@ class AgentCheckpointService:
 
     def _resolve_persisted_checkpoint_id(self, user_id: str, thread_id: str) -> str | None:
         """解析最近一个业务上已完成并可恢复的 checkpoint。"""
-        persisted_checkpoint_id = self._chat_store.get_latest_persisted_result_checkpoint_id(user_id, thread_id)
-        if persisted_checkpoint_id:
-            return persisted_checkpoint_id
-        return self._chat_store.get_thread_root_checkpoint_id(thread_id)
+        return self._chat_store.get_latest_persisted_result_checkpoint_id(user_id, thread_id)
 
     async def get_latest_checkpoint_id(self, thread_id: str) -> str | None:
         """返回线程当前最新的 LangGraph checkpoint id。"""

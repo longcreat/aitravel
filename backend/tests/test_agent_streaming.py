@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import pytest
 from langchain_core.messages import AIMessageChunk, ToolMessage
-from langgraph.types import Interrupt
 
 from app.agent.context import AgentRequestContext
 from app.agent.streaming import (
     AgentStreamService,
     StreamRunState,
-    _extract_interrupt_payload,
     _extract_tool_events,
     _serialize_stream_part,
 )
@@ -18,7 +16,7 @@ class _WhitespaceChunkAgent:
     async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
         assert config is not None
         assert context is not None
-        assert stream_mode == ["messages", "updates", "values"]
+        assert stream_mode == ["messages", "updates"]
         assert version == "v2"
         yield {
             "type": "messages",
@@ -33,6 +31,51 @@ class _WhitespaceChunkAgent:
 class _FakeRuntimeService:
     def require_runtime(self):
         return type("Runtime", (), {"agent": _WhitespaceChunkAgent()})()
+
+
+class _ToolCallChunkAgent:
+    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
+        assert config is not None
+        assert context is not None
+        assert stream_mode == ["messages", "updates"]
+        assert version == "v2"
+        yield {
+            "type": "messages",
+            "data": (
+                AIMessageChunk(
+                    content="",
+                    id="chunk-tool-1",
+                    tool_call_chunks=[
+                        {
+                            "name": "maps_weather",
+                            "args": '{"city":"杭州"}',
+                            "id": "call-weather-1",
+                            "index": 0,
+                        }
+                    ],
+                ),
+                {"langgraph_node": "model"},
+            ),
+        }
+        yield {
+            "type": "updates",
+            "data": {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            name="maps_weather",
+                            content="杭州晴，26℃",
+                            tool_call_id="call-weather-1",
+                        )
+                    ]
+                }
+            },
+        }
+
+
+class _ToolCallRuntimeService:
+    def require_runtime(self):
+        return type("Runtime", (), {"agent": _ToolCallChunkAgent()})()
 
 
 def test_serialize_stream_part_converts_langchain_messages() -> None:
@@ -84,31 +127,39 @@ async def test_stream_agent_run_preserves_whitespace_for_tts_chunks(
     assert "".join(captured_chunks) == "你好 世界"
 
 
-def test_extract_interrupt_payload_normalizes_langgraph_interrupts() -> None:
-    payload = _extract_interrupt_payload(
-        {
-            "type": "values",
-            "data": {},
-            "interrupts": (
-                Interrupt(
-                    value={
-                        "kind": "clarification",
-                        "question": "请问你想去哪座城市？",
-                        "missing_field": "destination_city",
-                        "suggested_replies": ["杭州", "上海"],
-                        "allow_custom_input": True,
-                    },
-                    id="interrupt-1",
-                ),
-            ),
-        }
-    )
+@pytest.mark.asyncio
+async def test_stream_agent_run_emits_tool_start_from_message_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
 
-    assert payload is not None
-    assert payload.interrupt_id == "interrupt-1"
-    assert payload.question == "请问你想去哪座城市？"
-    assert payload.missing_field == "destination_city"
-    assert payload.suggested_replies == ["杭州", "上海"]
+    service = AgentStreamService(runtime_service=_ToolCallRuntimeService())
+    state = StreamRunState()
+    events: list[tuple[str, dict]] = []
+
+    async for event_name, payload in service.stream_agent_run(
+        thread_id="thread-tool-first",
+        agent_input={"messages": ["ignored"]},
+        checkpoint_id=None,
+        model_profile_key="standard",
+        state=state,
+        agent_context=AgentRequestContext(
+            user_id="user-1",
+            thread_id="thread-tool-first",
+            locale="zh-CN",
+            model_profile_key="standard",
+            session_meta={},
+        ),
+    ):
+        events.append((event_name, payload))
+
+    assert [event_name for event_name, _ in events] == ["tool.start", "tool.done"]
+    assert events[0][1]["part"]["status"] == "running"
+    assert events[0][1]["part"]["tool_name"] == "maps_weather"
+    assert events[0][1]["part"]["input"] == {"city": "杭州"}
+    assert events[1][1]["part"]["status"] == "success"
+    assert events[1][1]["part"]["output"] == "杭州晴，26℃"
+    assert [part.type for part in state.ui_parts] == ["tool"]
 
 
 def test_extract_tool_events_prefers_tool_artifact_for_payload() -> None:

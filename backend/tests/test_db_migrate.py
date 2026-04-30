@@ -42,7 +42,7 @@ def test_run_sqlite_migrations_is_idempotent(tmp_path: Path) -> None:
     first = run_sqlite_migrations(db_path)
     second = run_sqlite_migrations(db_path)
 
-    assert first == [1, 2, 3, 4]
+    assert first == [1, 2, 3, 4, 5]
     assert second == []
 
 
@@ -87,7 +87,7 @@ def test_bootstrap_sqlite_database_reset_recreates_database(tmp_path: Path) -> N
     finally:
         conn.close()
 
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
 
 
 def test_run_sqlite_migrations_rejects_unversioned_legacy_database(tmp_path: Path) -> None:

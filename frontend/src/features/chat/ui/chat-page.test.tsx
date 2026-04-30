@@ -25,9 +25,6 @@ vi.mock("@/features/location/lib/amap-location", () => ({
 }));
 
 const emptyMeta = {
-  tool_traces: [],
-  step_groups: [],
-  render_segments: [],
   mcp_connected_servers: [],
   mcp_errors: [],
 } as const;
@@ -50,6 +47,92 @@ function createSseStream(chunks: string[]): ReadableStream<Uint8Array> {
       controller.close();
     },
   });
+}
+
+function createControlledSseStream() {
+  const encoder = new TextEncoder();
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  const stream = new ReadableStream<Uint8Array>({
+    start(nextController) {
+      controller = nextController;
+    },
+  });
+
+  return {
+    stream,
+    enqueue(chunk: string) {
+      controller?.enqueue(encoder.encode(chunk));
+    },
+    close() {
+      controller?.close();
+    },
+  };
+}
+
+function sseEvent(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function textPart(id: string, text: string, status = "completed") {
+  return { id, type: "text", text, status };
+}
+
+function userMessage(id: string, text: string, createdAt = "2026-04-08T00:00:00Z") {
+  return {
+    id,
+    role: "user",
+    text,
+    parts: [textPart(`${id}-text`, text)],
+    status: "completed",
+    meta: null,
+    created_at: createdAt,
+  };
+}
+
+function assistantMessage({
+  id,
+  versionId,
+  text = "",
+  parts = [],
+  status = "completed",
+  meta = emptyMeta,
+  canRegenerate = true,
+  createdAt = "2026-04-08T00:00:01Z",
+}: {
+  id: string;
+  versionId: string;
+  text?: string;
+  parts?: unknown[];
+  status?: string;
+  meta?: unknown;
+  canRegenerate?: boolean;
+  createdAt?: string;
+}) {
+  return {
+    id,
+    role: "assistant",
+    text,
+    parts,
+    status,
+    meta,
+    current_version_id: versionId,
+    versions: [
+      {
+        id: versionId,
+        version_index: 1,
+        kind: "original",
+        text,
+        parts,
+        status,
+        meta,
+        feedback: null,
+        speech_status: null,
+        created_at: createdAt,
+      },
+    ],
+    can_regenerate: canRegenerate,
+    created_at: createdAt,
+  };
 }
 
 function LocationProbe() {
@@ -274,7 +357,20 @@ describe("ChatPage", () => {
     });
 
     const stream = createSseStream([
-      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"已收到。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
+      sseEvent("turn.start", {
+        thread_id: "thread-test-1",
+        user_message: userMessage("msg-quick-user", "最近天气怎么样，适合出去玩吗？"),
+        assistant_message: assistantMessage({ id: "msg-quick-assistant", versionId: "ver-quick-1", status: "streaming" }),
+      }),
+      sseEvent("message.completed", {
+        message: assistantMessage({
+          id: "msg-quick-assistant",
+          versionId: "ver-quick-1",
+          text: "已收到。",
+          parts: [textPart("text-1", "已收到。")],
+        }),
+      }),
+      sseEvent("turn.done", { thread_id: "thread-test-1" }),
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -338,175 +434,6 @@ describe("ChatPage", () => {
     expect(getCurrentLocationNameMock).not.toHaveBeenCalled();
   });
 
-  it("renders clarification interrupt and resumes the same run after selecting a quick reply", async () => {
-    setStoredAccessToken("token-hitl");
-    setStoredAuthUser({
-      id: "user-hitl",
-      email: "hitl@example.com",
-      nickname: "hitl",
-      created_at: "2026-04-08T00:00:00Z",
-      updated_at: "2026-04-08T00:00:00Z",
-    });
-
-    const interruptStream = createSseStream([
-      'event: interrupt\ndata: {"kind":"clarification","interrupt_id":"interrupt-city","question":"请问你想查哪个城市的天气？","missing_field":"city","suggested_replies":["杭州","上海"],"allow_custom_input":true}\n\n',
-    ]);
-    const resumeStream = createSseStream([
-      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"human","data":{"content":"最近天气怎么样，适合出去玩吗？","additional_kwargs":{},"response_metadata":{},"type":"human","name":null,"id":null}},{"type":"ai","data":{"content":"杭州这几天温度适中，适合安排轻松出游。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
-    ]);
-
-    let resumeCalled = false;
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = (init?.method ?? "GET").toUpperCase();
-
-      if (url.includes("/api/auth/me") && method === "GET") {
-        return {
-          ok: true,
-          status: 200,
-          json: async (): Promise<unknown> => ({
-            id: "user-hitl",
-            email: "hitl@example.com",
-            nickname: "hitl",
-            created_at: "2026-04-08T00:00:00Z",
-            updated_at: "2026-04-08T00:00:00Z",
-          }),
-          text: async (): Promise<string> => "",
-        };
-      }
-
-      if (url.includes("/api/chat/model-profiles") && method === "GET") {
-        return {
-          ok: true,
-          status: 200,
-          json: async (): Promise<unknown> => modelProfilesResponse,
-          text: async (): Promise<string> => "",
-        };
-      }
-
-      if (url.endsWith("/api/sessions") && method === "GET") {
-        return {
-          ok: true,
-          status: 200,
-          json: async (): Promise<unknown> =>
-            resumeCalled
-              ? [
-                  {
-                    thread_id: "thread-test-1",
-                    title: "最近天气怎么样...",
-                    created_at: "2026-04-08T00:00:00Z",
-                    updated_at: "2026-04-08T00:00:00Z",
-                    last_message_preview: "杭州这几天温度适中，适合安排轻松出游。",
-                  },
-                ]
-              : [],
-          text: async (): Promise<string> => "[]",
-        };
-      }
-
-      if (url.includes("/api/chat/stream") && method === "POST") {
-        return {
-          ok: true,
-          status: 200,
-          body: interruptStream,
-          text: async (): Promise<string> => "",
-        };
-      }
-
-      if (url.includes("/api/chat/resume/stream") && method === "POST") {
-        resumeCalled = true;
-        return {
-          ok: true,
-          status: 200,
-          body: resumeStream,
-          text: async (): Promise<string> => "",
-        };
-      }
-
-      if (url.includes("/api/sessions/thread-test-1") && method === "GET") {
-        return {
-          ok: true,
-          status: 200,
-          json: async (): Promise<unknown> => ({
-            thread_id: "thread-test-1",
-            title: "最近天气怎么样...",
-            created_at: "2026-04-08T00:00:00Z",
-            updated_at: "2026-04-08T00:00:00Z",
-            model_profile_key: "standard",
-            messages: [
-              {
-                id: "msg-hitl-user",
-                role: "user",
-                text: "最近天气怎么样，适合出去玩吗？",
-                meta: null,
-                created_at: "2026-04-08T00:00:00Z",
-              },
-              {
-                id: "msg-hitl-assistant",
-                role: "assistant",
-                text: "杭州这几天温度适中，适合安排轻松出游。",
-                meta: { ...emptyMeta },
-                current_version_id: "ver-hitl-1",
-                versions: [
-                  {
-                    id: "ver-hitl-1",
-                    version_index: 1,
-                    kind: "original",
-                    text: "杭州这几天温度适中，适合安排轻松出游。",
-                    meta: { ...emptyMeta },
-                    feedback: null,
-                    speech_status: null,
-                    created_at: "2026-04-08T00:00:01Z",
-                  },
-                ],
-                can_regenerate: true,
-                created_at: "2026-04-08T00:00:01Z",
-              },
-            ],
-          }),
-          text: async (): Promise<string> => "",
-        };
-      }
-
-      return {
-        ok: false,
-        status: 404,
-        text: async (): Promise<string> => "not found",
-      };
-    });
-
-    vi.stubGlobal("fetch", fetchMock);
-    renderChatPage();
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "new-session" })).toBeInTheDocument();
-    });
-
-    const input = screen.getByPlaceholderText("发消息或按住说话");
-    await userEvent.type(input, "最近天气怎么样，适合出去玩吗？");
-    await userEvent.click(screen.getByRole("button", { name: "send-message" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("请问你想查哪个城市的天气？")).toBeInTheDocument();
-    });
-
-    await userEvent.click(screen.getByRole("button", { name: "杭州" }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/chat/resume/stream"),
-        expect.objectContaining({
-          method: "POST",
-          body: expect.stringContaining('"answer":"杭州"'),
-        }),
-      );
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText("杭州这几天温度适中，适合安排轻松出游。")).toBeInTheDocument();
-    });
-  });
-
   it("sends the selected model profile with a new thread message", async () => {
     setStoredAccessToken("token-model");
     setStoredAuthUser({
@@ -518,7 +445,20 @@ describe("ChatPage", () => {
     });
 
     const stream = createSseStream([
-      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"收到。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
+      sseEvent("turn.start", {
+        thread_id: "thread-test-1",
+        user_message: userMessage("msg-model-user", "帮我想一个深度行程"),
+        assistant_message: assistantMessage({ id: "msg-model-assistant", versionId: "ver-model-1", status: "streaming" }),
+      }),
+      sseEvent("message.completed", {
+        message: assistantMessage({
+          id: "msg-model-assistant",
+          versionId: "ver-model-1",
+          text: "收到。",
+          parts: [textPart("text-1", "收到。")],
+        }),
+      }),
+      sseEvent("turn.done", { thread_id: "thread-test-1" }),
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1181,13 +1121,58 @@ describe("ChatPage", () => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
+    const firstText = "我先帮你查找余杭区附近适合周末散心的景点。";
+    const finalText = "基于我的搜索，为你推荐良渚古城遗址公园、东明山森林公园和梦想小镇附近的慢行路线。";
+    const toolPart = {
+      id: "tool-call-1",
+      type: "tool",
+      tool_call_id: "call-1",
+      tool_name: "amap_search_spots",
+      input: { district: "余杭区" },
+      output: "搜索到 3 个景点",
+      status: "success",
+    };
     const stream = createSseStream([
-      'event: messages\ndata: {"type":"messages","ns":[],"data":[{"type":"AIMessageChunk","data":{"content":"我先帮你查找余杭区附近适合周末散心的景点。","additional_kwargs":{},"response_metadata":{},"type":"AIMessageChunk","name":null,"id":"chunk-1","tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null,"tool_call_chunks":[],"chunk_position":null}},{"langgraph_node":"model"}]}\n\n',
-      'event: updates\ndata: {"type":"updates","ns":[],"data":{"model":{"messages":[{"type":"ai","data":{"content":"我先帮你查找余杭区附近适合周末散心的景点。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"amap_search_spots","args":{"district":"余杭区"},"id":"call-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}}]}}}\n\n',
-      'event: updates\ndata: {"type":"updates","ns":[],"data":{"tools":{"messages":[{"type":"tool","data":{"content":"搜索到 3 个景点","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"amap_search_spots","id":null,"tool_call_id":"call-1","artifact":null,"status":"success"}}]}}}\n\n',
-      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"我先帮你查找余杭区附近适合周末散心的景点。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"amap_search_spots","args":{"district":"余杭区"},"id":"call-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}},{"type":"tool","data":{"content":"搜索到 3 个景点","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"amap_search_spots","id":null,"tool_call_id":"call-1","artifact":null,"status":"success"}}]}}\n\n',
-      'event: messages\ndata: {"type":"messages","ns":[],"data":[{"type":"AIMessageChunk","data":{"content":"基于我的搜索，为你推荐良渚古城遗址公园、东明山森林公园和梦想小镇附近的慢行路线。","additional_kwargs":{},"response_metadata":{},"type":"AIMessageChunk","name":null,"id":"chunk-2","tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null,"tool_call_chunks":[],"chunk_position":null}},{"langgraph_node":"model"}]}\n\n',
-      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"我先帮你查找余杭区附近适合周末散心的景点。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"amap_search_spots","args":{"district":"余杭区"},"id":"call-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}},{"type":"tool","data":{"content":"搜索到 3 个景点","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"amap_search_spots","id":null,"tool_call_id":"call-1","artifact":null,"status":"success"}},{"type":"ai","data":{"content":"基于我的搜索，为你推荐良渚古城遗址公园、东明山森林公园和梦想小镇附近的慢行路线。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
+      sseEvent("turn.start", {
+        thread_id: "thread-test-1",
+        user_message: userMessage("msg-stream-user", "帮我规划日本6天行程"),
+        assistant_message: assistantMessage({ id: "msg-stream-assistant", versionId: "ver-stream-1", status: "streaming" }),
+      }),
+      sseEvent("part.delta", {
+        message_id: "msg-stream-assistant",
+        version_id: "ver-stream-1",
+        part_id: "text-1",
+        part_type: "text",
+        text_delta: firstText,
+        status: "streaming",
+      }),
+      sseEvent("tool.start", {
+        message_id: "msg-stream-assistant",
+        version_id: "ver-stream-1",
+        part: { ...toolPart, output: undefined, status: "running" },
+      }),
+      sseEvent("tool.done", {
+        message_id: "msg-stream-assistant",
+        version_id: "ver-stream-1",
+        part: toolPart,
+      }),
+      sseEvent("part.delta", {
+        message_id: "msg-stream-assistant",
+        version_id: "ver-stream-1",
+        part_id: "text-2",
+        part_type: "text",
+        text_delta: finalText,
+        status: "streaming",
+      }),
+      sseEvent("message.completed", {
+        message: assistantMessage({
+          id: "msg-stream-assistant",
+          versionId: "ver-stream-1",
+          text: `${firstText}${finalText}`,
+          parts: [textPart("text-1", firstText), toolPart, textPart("text-2", finalText)],
+        }),
+      }),
+      sseEvent("turn.done", { thread_id: "thread-test-1" }),
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1264,12 +1249,289 @@ describe("ChatPage", () => {
     });
 
     await userEvent.click(stepButton!);
-    expect(await screen.findByText("Summary")).toBeInTheDocument();
+    expect(await screen.findByText("返回结果")).toBeInTheDocument();
     expect(screen.getAllByText("amap search spots").length).toBeGreaterThan(0);
     expect(screen.getByText("搜索到 3 个景点")).toBeInTheDocument();
 
     const streamCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/stream"));
     expect(streamCalls).toHaveLength(1);
+  });
+
+  it("keeps streamed tool parts between text chunks when a text part continues after the tool", async () => {
+    setStoredAccessToken("token-order");
+    setStoredAuthUser({
+      id: "user-order",
+      email: "order@example.com",
+      nickname: "order",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const controlledStream = createControlledSseStream();
+    const toolPart = {
+      id: "tool-call-order-1",
+      type: "tool",
+      tool_call_id: "call-order-1",
+      tool_name: "amap_search_spots",
+      input: { district: "余杭区" },
+      status: "running",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/api/auth/me") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            id: "user-order",
+            email: "order@example.com",
+            nickname: "order",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/sessions") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown[]> => [],
+          text: async (): Promise<string> => "[]",
+        };
+      }
+
+      if (url.includes("/api/chat/stream") && method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          body: controlledStream.stream,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      return {
+        ok: false,
+        status: 404,
+        text: async (): Promise<string> => "not found",
+      };
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    renderChatPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "new-session" })).toBeInTheDocument();
+    });
+
+    const input = await screen.findByPlaceholderText("发消息或按住说话");
+    await userEvent.type(input, "查一下周边景点");
+    await userEvent.click(screen.getByRole("button", { name: "send-message" }));
+
+    controlledStream.enqueue(
+      sseEvent("turn.start", {
+        thread_id: "thread-test-1",
+        user_message: userMessage("msg-order-user", "查一下周边景点"),
+        assistant_message: assistantMessage({ id: "msg-order-assistant", versionId: "ver-order-1", status: "streaming" }),
+      }),
+    );
+    controlledStream.enqueue(
+      sseEvent("part.delta", {
+        message_id: "msg-order-assistant",
+        version_id: "ver-order-1",
+        part_id: "text-1",
+        part_type: "text",
+        text_delta: "我先查一下。",
+        status: "streaming",
+      }),
+    );
+    controlledStream.enqueue(
+      sseEvent("tool.start", {
+        message_id: "msg-order-assistant",
+        version_id: "ver-order-1",
+        part: toolPart,
+      }),
+    );
+    controlledStream.enqueue(
+      sseEvent("part.delta", {
+        message_id: "msg-order-assistant",
+        version_id: "ver-order-1",
+        part_id: "text-1",
+        part_type: "text",
+        text_delta: "查完后给你路线。",
+        status: "streaming",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("我先查一下。")).toBeInTheDocument();
+      expect(screen.getByText("amap search spots")).toBeInTheDocument();
+      expect(screen.getByText("查完后给你路线。")).toBeInTheDocument();
+    });
+
+    const renderedText = document.body.textContent ?? "";
+    expect(renderedText.indexOf("我先查一下。")).toBeLessThan(renderedText.indexOf("amap search spots"));
+    expect(renderedText.indexOf("amap search spots")).toBeLessThan(renderedText.indexOf("查完后给你路线。"));
+
+    controlledStream.enqueue(
+      sseEvent("message.completed", {
+        message: assistantMessage({
+          id: "msg-order-assistant",
+          versionId: "ver-order-1",
+          text: "我先查一下。查完后给你路线。",
+          parts: [
+            textPart("text-1", "我先查一下。"),
+            { ...toolPart, output: "搜索到 3 个景点", status: "success" },
+            textPart("text-2", "查完后给你路线。"),
+          ],
+        }),
+      }),
+    );
+    controlledStream.enqueue(sseEvent("turn.done", { thread_id: "thread-test-1" }));
+    controlledStream.close();
+  });
+
+  it("shows the running tool card before text when the first streamed part is a tool", async () => {
+    setStoredAccessToken("token-tool-first");
+    setStoredAuthUser({
+      id: "user-tool-first",
+      email: "tool-first@example.com",
+      nickname: "tool-first",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      rafCallbacks.push(callback);
+      return rafCallbacks.length;
+    }));
+
+    const controlledStream = createControlledSseStream();
+    const runningToolPart = {
+      id: "tool-call-weather-1",
+      type: "tool",
+      tool_call_id: "call-weather-1",
+      tool_name: "amap-mcp-server_maps_weather",
+      input: { city: "杭州" },
+      output: null,
+      status: "running",
+    };
+    const successToolPart = {
+      ...runningToolPart,
+      output: "杭州未来 4 天天气",
+      status: "success",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/api/auth/me") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown> => ({
+            id: "user-tool-first",
+            email: "tool-first@example.com",
+            nickname: "tool-first",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }),
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      if (url.includes("/api/sessions") && method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async (): Promise<unknown[]> => [],
+          text: async (): Promise<string> => "[]",
+        };
+      }
+
+      if (url.includes("/api/chat/stream") && method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          body: controlledStream.stream,
+          text: async (): Promise<string> => "",
+        };
+      }
+
+      return {
+        ok: false,
+        status: 404,
+        text: async (): Promise<string> => "not found",
+      };
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    renderChatPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "new-session" })).toBeInTheDocument();
+    });
+
+    const input = await screen.findByPlaceholderText("发消息或按住说话");
+    await userEvent.type(input, "杭州天气查询");
+    await userEvent.click(screen.getByRole("button", { name: "send-message" }));
+
+    controlledStream.enqueue(
+      sseEvent("turn.start", {
+        thread_id: "thread-test-1",
+        user_message: userMessage("msg-tool-first-user", "杭州天气查询"),
+        assistant_message: assistantMessage({ id: "msg-tool-first-assistant", versionId: "ver-tool-first-1", status: "streaming" }),
+      }) +
+        sseEvent("tool.start", {
+          message_id: "msg-tool-first-assistant",
+          version_id: "ver-tool-first-1",
+          part: runningToolPart,
+        }) +
+        sseEvent("tool.done", {
+          message_id: "msg-tool-first-assistant",
+          version_id: "ver-tool-first-1",
+          part: successToolPart,
+        }) +
+        sseEvent("part.delta", {
+          message_id: "msg-tool-first-assistant",
+          version_id: "ver-tool-first-1",
+          part_id: "text-1",
+          part_type: "text",
+          text_delta: "根据高德地图天气数据，杭州未来几天有雨。",
+          status: "streaming",
+        }) +
+        sseEvent("message.completed", {
+          message: assistantMessage({
+            id: "msg-tool-first-assistant",
+            versionId: "ver-tool-first-1",
+            text: "根据高德地图天气数据，杭州未来几天有雨。",
+            parts: [successToolPart, textPart("text-1", "根据高德地图天气数据，杭州未来几天有雨。")],
+          }),
+        }) +
+        sseEvent("turn.done", { thread_id: "thread-test-1" }),
+    );
+    controlledStream.close();
+
+    const toolButton = await screen.findByRole("button", {
+      name: "open-tool-group-persisted-msg-tool-first-assistant-0",
+    });
+    expect(toolButton).toHaveTextContent("高德地图 · 天气查询");
+    expect(toolButton.querySelector(".animate-spin")).not.toBeNull();
+    expect(screen.queryByText("根据高德地图天气数据，杭州未来几天有雨。")).not.toBeInTheDocument();
+
+    expect(rafCallbacks.length).toBeGreaterThan(0);
+    for (const callback of rafCallbacks.splice(0)) {
+      callback(performance.now());
+    }
+
+    await waitFor(() => {
+      expect(toolButton.querySelector(".animate-spin")).toBeNull();
+      expect(screen.getByText("根据高德地图天气数据，杭州未来几天有雨。")).toBeInTheDocument();
+    });
   });
 
   it("preserves tool artifact payload from SSE updates and shows structured JSON in summary", async () => {
@@ -1282,11 +1544,61 @@ describe("ChatPage", () => {
       updated_at: new Date().toISOString(),
     });
 
+    const exaIntroText = "我先用 Exa 查一下京都攻略。";
+    const exaFinalText = "我找到一篇不错的京都攻略。";
+    const exaToolPart = {
+      id: "tool-call-exa-1",
+      type: "tool",
+      tool_call_id: "call-exa-1",
+      tool_name: "exa_web_search_advanced_exa",
+      input: { query: "京都攻略", num_results: 3 },
+      output: {
+        kind: "exa_search",
+        results: [{ title: "Kyoto Guide", url: "https://example.com/kyoto" }],
+      },
+      status: "success",
+    };
     const stream = createSseStream([
-      'event: messages\ndata: {"type":"messages","ns":[],"data":[{"type":"AIMessageChunk","data":{"content":"我先用 Exa 查一下京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"AIMessageChunk","name":null,"id":"chunk-exa-1","tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null,"tool_call_chunks":[],"chunk_position":null}},{"langgraph_node":"model"}]}\n\n',
-      'event: updates\ndata: {"type":"updates","ns":[],"data":{"model":{"messages":[{"type":"ai","data":{"content":"我先用 Exa 查一下京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"exa_web_search_advanced_exa","args":{"query":"京都攻略","num_results":3},"id":"call-exa-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}}]}}}\n\n',
-      'event: updates\ndata: {"type":"updates","ns":[],"data":{"tools":{"messages":[{"type":"tool","data":{"content":"Exa 高级搜索找到 1 条结果。","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"exa_web_search_advanced_exa","id":null,"tool_call_id":"call-exa-1","artifact":{"kind":"exa_search","results":[{"title":"Kyoto Guide","url":"https://example.com/kyoto"}]},"status":"success"}}]}}}\n\n',
-      'event: values\ndata: {"type":"values","ns":[],"data":{"messages":[{"type":"ai","data":{"content":"我先用 Exa 查一下京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[{"name":"exa_web_search_advanced_exa","args":{"query":"京都攻略","num_results":3},"id":"call-exa-1","type":"tool_call"}],"invalid_tool_calls":[],"usage_metadata":null}},{"type":"tool","data":{"content":"Exa 高级搜索找到 1 条结果。","additional_kwargs":{},"response_metadata":{},"type":"tool","name":"exa_web_search_advanced_exa","id":null,"tool_call_id":"call-exa-1","artifact":{"kind":"exa_search","results":[{"title":"Kyoto Guide","url":"https://example.com/kyoto"}]},"status":"success"}},{"type":"ai","data":{"content":"我找到一篇不错的京都攻略。","additional_kwargs":{},"response_metadata":{},"type":"ai","name":null,"id":null,"tool_calls":[],"invalid_tool_calls":[],"usage_metadata":null}}]}}\n\n',
+      sseEvent("turn.start", {
+        thread_id: "thread-test-1",
+        user_message: userMessage("msg-exa-user", "帮我找一篇京都攻略"),
+        assistant_message: assistantMessage({ id: "msg-exa-assistant", versionId: "ver-exa-1", status: "streaming" }),
+      }),
+      sseEvent("part.delta", {
+        message_id: "msg-exa-assistant",
+        version_id: "ver-exa-1",
+        part_id: "text-1",
+        part_type: "text",
+        text_delta: exaIntroText,
+        status: "streaming",
+      }),
+      sseEvent("tool.start", {
+        message_id: "msg-exa-assistant",
+        version_id: "ver-exa-1",
+        part: { ...exaToolPart, output: undefined, status: "running" },
+      }),
+      sseEvent("tool.done", {
+        message_id: "msg-exa-assistant",
+        version_id: "ver-exa-1",
+        part: exaToolPart,
+      }),
+      sseEvent("part.delta", {
+        message_id: "msg-exa-assistant",
+        version_id: "ver-exa-1",
+        part_id: "text-2",
+        part_type: "text",
+        text_delta: exaFinalText,
+        status: "streaming",
+      }),
+      sseEvent("message.completed", {
+        message: assistantMessage({
+          id: "msg-exa-assistant",
+          versionId: "ver-exa-1",
+          text: `${exaIntroText}${exaFinalText}`,
+          parts: [textPart("text-1", exaIntroText), exaToolPart, textPart("text-2", exaFinalText)],
+        }),
+      }),
+      sseEvent("turn.done", { thread_id: "thread-test-1" }),
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1354,14 +1666,9 @@ describe("ChatPage", () => {
 
     await userEvent.click(stepButton!);
     const dialog = await screen.findByRole("dialog");
-    const toolLabel = within(dialog).getByText("Exa · 高级网络搜索");
-    const toolButton = toolLabel.closest("button");
-    expect(toolButton).not.toBeNull();
-    await userEvent.click(toolButton!);
-
-    expect(await screen.findByText(/"kind": "exa_search"/)).toBeInTheDocument();
-    expect(screen.getByText(/"title": "Kyoto Guide"/)).toBeInTheDocument();
-    expect(screen.getByText(/"query": "京都攻略"/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/"kind": "exa_search"/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"title": "Kyoto Guide"/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"query": "京都攻略"/)).toBeInTheDocument();
   });
 
   it("keeps cached login state when /api/auth/me fails with a non-auth error", async () => {
@@ -1464,8 +1771,24 @@ describe("ChatPage", () => {
       updated_at: new Date().toISOString(),
     });
 
+    const friendlyFailureText = "当前请求失败，可能是网络或后端服务异常。你可以重试，或先告诉我你希望去哪里。";
     const stream = createSseStream([
-      'event: error\ndata: {"message":"请求失败，请稍后重试。"}\n\n',
+      sseEvent("turn.start", {
+        thread_id: "thread-test-1",
+        user_message: userMessage("msg-error-user", "今天的天气咋样"),
+        assistant_message: assistantMessage({ id: "msg-error-assistant", versionId: "ver-error-1", status: "streaming" }),
+      }),
+      sseEvent("message.completed", {
+        message: assistantMessage({
+          id: "msg-error-assistant",
+          versionId: "ver-error-1",
+          text: friendlyFailureText,
+          parts: [textPart("text-1", friendlyFailureText, "failed")],
+          status: "failed",
+          canRegenerate: false,
+        }),
+      }),
+      sseEvent("error", { message: "请求失败，请稍后重试。" }),
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1553,7 +1876,11 @@ describe("ChatPage", () => {
     });
 
     const regenerateStream = createSseStream([
-      'event: error\ndata: {"message":"重新生成失败"}\n\n',
+      sseEvent("turn.start", {
+        thread_id: "t-1",
+        assistant_message: assistantMessage({ id: "msg-regen-assistant", versionId: "ver-regen-12", status: "streaming" }),
+      }),
+      sseEvent("error", { message: "重新生成失败" }),
     ]);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1613,6 +1940,8 @@ describe("ChatPage", () => {
                 id: "msg-regen-assistant",
                 role: "assistant",
                 text: "旧的推荐结果",
+                parts: [textPart("text-1", "旧的推荐结果")],
+                status: "completed",
                 meta: { ...emptyMeta },
                 current_version_id: "ver-regen-11",
                 versions: [
@@ -1621,6 +1950,8 @@ describe("ChatPage", () => {
                     version_index: 1,
                     kind: "original",
                     text: "旧的推荐结果",
+                    parts: [textPart("text-1", "旧的推荐结果")],
+                    status: "completed",
                     meta: { ...emptyMeta },
                     feedback: null,
                     speech_status: null,

@@ -25,6 +25,51 @@ async def _fake_audio_stream():
     yield b"fake-mp3-bytes"
 
 
+def _user_message_payload(message_id: str, text: str) -> dict:
+    return {
+        "id": message_id,
+        "role": "user",
+        "text": text,
+        "parts": [{"id": f"{message_id}-text", "type": "text", "text": text, "status": "completed"}],
+        "status": "completed",
+        "meta": None,
+        "current_version_id": None,
+        "versions": [],
+        "can_regenerate": False,
+        "created_at": "2026-04-05T00:00:00Z",
+    }
+
+
+def _assistant_message_payload(message_id: str, version_id: str, *, text: str = "", status: str = "completed") -> dict:
+    parts = [{"id": "text-1", "type": "text", "text": text, "status": status}] if text else []
+    return {
+        "id": message_id,
+        "role": "assistant",
+        "text": text,
+        "parts": parts,
+        "status": status,
+        "meta": {"mcp_connected_servers": [], "mcp_errors": []},
+        "current_version_id": version_id,
+        "versions": [
+            {
+                "id": version_id,
+                "version_index": 1,
+                "kind": "original",
+                "text": text,
+                "parts": parts,
+                "status": status,
+                "meta": {"mcp_connected_servers": [], "mcp_errors": []},
+                "feedback": None,
+                "speech_status": None,
+                "speech_mime_type": None,
+                "created_at": "2026-04-05T00:00:01Z",
+            }
+        ],
+        "can_regenerate": True,
+        "created_at": "2026-04-05T00:00:01Z",
+    }
+
+
 class _FakeService:
     def __init__(self) -> None:
         self.feedback: str | None = None
@@ -47,121 +92,57 @@ class _FakeService:
         }
 
     async def stream_invoke(self, _user_id, _payload):
-        self.resume_request_payload = None
-        yield "messages", {
-            "type": "messages",
-            "ns": [],
-            "data": [
-                {
-                    "type": "AIMessageChunk",
-                    "data": {
-                        "content": "这是",
-                        "additional_kwargs": {},
-                        "response_metadata": {},
-                        "type": "AIMessageChunk",
-                        "name": None,
-                        "id": "chunk-1",
-                        "tool_calls": [],
-                        "invalid_tool_calls": [],
-                        "usage_metadata": None,
-                        "tool_call_chunks": [],
-                        "chunk_position": None,
-                    },
-                },
-                {"langgraph_node": "model"},
-            ],
+        yield "turn.start", {
+            "thread_id": "t-1",
+            "user_message": _user_message_payload("msg-user-stream-1", "帮我做一个3天杭州行程"),
+            "assistant_message": _assistant_message_payload("msg-assistant-stream-1", "ver-stream-1", status="streaming"),
         }
-        yield "updates", {
-            "type": "updates",
-            "ns": [],
-            "data": {
-                "model": {
-                    "messages": [
-                        {
-                            "type": "ai",
-                            "data": {
-                                "content": "我先调用预算工具。",
-                                "additional_kwargs": {},
-                                "response_metadata": {},
-                                "type": "ai",
-                                "name": None,
-                                "id": None,
-                                "tool_calls": [{"name": "get_current_time", "args": {}, "id": "call-1", "type": "tool_call"}],
-                                "invalid_tool_calls": [],
-                                "usage_metadata": None,
-                            },
-                        }
-                    ]
-                }
+        yield "part.delta", {
+            "message_id": "msg-assistant-stream-1",
+            "version_id": "ver-stream-1",
+            "part_id": "text-1",
+            "part_type": "text",
+            "text_delta": "这是",
+            "status": "streaming",
+        }
+        yield "tool.start", {
+            "message_id": "msg-assistant-stream-1",
+            "version_id": "ver-stream-1",
+            "part": {
+                "id": "tool-call-1",
+                "type": "tool",
+                "tool_call_id": "call-1",
+                "tool_name": "get_current_time",
+                "input": {},
+                "output": None,
+                "status": "running",
             },
         }
-        yield "messages", {
-            "type": "messages",
-            "ns": [],
-            "data": [
-                {
-                    "type": "AIMessageChunk",
-                    "data": {
-                        "content": "一个测试回复",
-                        "additional_kwargs": {},
-                        "response_metadata": {},
-                        "type": "AIMessageChunk",
-                        "name": None,
-                        "id": "chunk-2",
-                        "tool_calls": [],
-                        "invalid_tool_calls": [],
-                        "usage_metadata": None,
-                        "tool_call_chunks": [],
-                        "chunk_position": None,
-                    },
-                },
-                {"langgraph_node": "model"},
-            ],
+        yield "part.delta", {
+            "message_id": "msg-assistant-stream-1",
+            "version_id": "ver-stream-1",
+            "part_id": "text-1",
+            "part_type": "text",
+            "text_delta": "一个测试回复",
+            "status": "streaming",
         }
-        yield "updates", {
-            "type": "updates",
-            "ns": [],
-            "data": {
-                "tools": {
-                    "messages": [
-                        {
-                            "type": "tool",
-                            "data": {
-                                "content": "{\"timezone\":\"Asia/Shanghai\",\"time\":\"21:02:21\"}",
-                                "additional_kwargs": {},
-                                "response_metadata": {},
-                                "type": "tool",
-                                "name": "get_current_time",
-                                "id": None,
-                                "tool_call_id": "call-1",
-                                "artifact": None,
-                                "status": "success",
-                            },
-                        }
-                    ]
-                }
+        yield "tool.done", {
+            "message_id": "msg-assistant-stream-1",
+            "version_id": "ver-stream-1",
+            "part": {
+                "id": "tool-call-1",
+                "type": "tool",
+                "tool_call_id": "call-1",
+                "tool_name": "get_current_time",
+                "input": {},
+                "output": {"timezone": "Asia/Shanghai", "time": "21:02:21"},
+                "status": "success",
             },
         }
-        yield "values", {
-            "type": "values",
-            "ns": [],
-            "data": {
-                "messages": [
-                    {"type": "ai", "data": {"content": "这是一个测试回复", "additional_kwargs": {}, "response_metadata": {}, "type": "ai", "name": None, "id": None, "tool_calls": [], "invalid_tool_calls": [], "usage_metadata": None}}
-                ],
-            },
+        yield "message.completed", {
+            "message": _assistant_message_payload("msg-assistant-stream-1", "ver-stream-1", text="这是一个测试回复"),
         }
-
-    async def stream_resume(self, _user_id, payload):
-        self.resume_request_payload = payload
-        yield "interrupt", {
-            "kind": "clarification",
-            "interrupt_id": payload.interrupt_id,
-            "question": "请问你想查哪个城市的天气？",
-            "missing_field": "city",
-            "suggested_replies": ["杭州", "上海"],
-            "allow_custom_input": True,
-        }
+        yield "turn.done", {"thread_id": "t-1"}
 
     def list_model_profiles(self) -> list[ChatModelProfile]:
         return [
@@ -201,7 +182,6 @@ class _FakeService:
                     role="assistant",
                     text="这是一个测试回复" if self.current_version_id == "ver-original-1" else "这是重生成后的回复",
                     meta=ChatMetaInfo(
-                        tool_traces=[],
                         mcp_connected_servers=[],
                         mcp_errors=[],
                     ),
@@ -213,7 +193,6 @@ class _FakeService:
                             kind="original",
                             text="这是一个测试回复",
                             meta=ChatMetaInfo(
-                                tool_traces=[],
                                 mcp_connected_servers=[],
                                 mcp_errors=[],
                             ),
@@ -228,7 +207,6 @@ class _FakeService:
                             kind="regenerated",
                             text="这是重生成后的回复",
                             meta=ChatMetaInfo(
-                                tool_traces=[],
                                 mcp_connected_servers=[],
                                 mcp_errors=[],
                             ),
@@ -269,51 +247,22 @@ class _FakeService:
     async def stream_regenerate(self, _user_id: str, thread_id: str, message_id: str):
         assert thread_id == "t-1"
         assert message_id == "msg-assistant-1"
-        yield "messages", {
-            "type": "messages",
-            "ns": [],
-            "data": [
-                {
-                    "type": "AIMessageChunk",
-                    "data": {
-                        "content": "新的",
-                        "additional_kwargs": {},
-                        "response_metadata": {},
-                        "type": "AIMessageChunk",
-                        "name": None,
-                        "id": "chunk-r1",
-                        "tool_calls": [],
-                        "invalid_tool_calls": [],
-                        "usage_metadata": None,
-                        "tool_call_chunks": [],
-                        "chunk_position": None,
-                    },
-                },
-                {"langgraph_node": "model"},
-            ],
+        yield "turn.start", {
+            "thread_id": thread_id,
+            "assistant_message": _assistant_message_payload(message_id, "ver-regenerated-stream-1", status="streaming"),
         }
-        yield "values", {
-            "type": "values",
-            "ns": [],
-            "data": {
-                "messages": [
-                    {
-                        "type": "ai",
-                        "data": {
-                            "content": "新的重生成回复",
-                            "additional_kwargs": {},
-                            "response_metadata": {},
-                            "type": "ai",
-                            "name": None,
-                            "id": None,
-                            "tool_calls": [],
-                            "invalid_tool_calls": [],
-                            "usage_metadata": None,
-                        },
-                    }
-                ],
-            },
+        yield "part.delta", {
+            "message_id": message_id,
+            "version_id": "ver-regenerated-stream-1",
+            "part_id": "text-1",
+            "part_type": "text",
+            "text_delta": "新的重生成回复",
+            "status": "streaming",
         }
+        yield "message.completed", {
+            "message": _assistant_message_payload(message_id, "ver-regenerated-stream-1", text="新的重生成回复"),
+        }
+        yield "turn.done", {"thread_id": thread_id}
 
     def switch_assistant_version(self, _user_id: str, thread_id: str, message_id: str, version_id: str):
         if thread_id != "t-1" or message_id != "msg-assistant-1" or version_id not in {"ver-original-1", "ver-regenerated-1"}:
@@ -400,36 +349,12 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
 
         events = _parse_sse(response.text)
         names = [event[0] for event in events]
-        assert names == ["messages", "updates", "messages", "updates", "values"]
-        assert events[0][1]["data"][0]["data"]["content"] == "这是"
-        assert events[2][1]["data"][0]["data"]["content"] == "一个测试回复"
-        assert events[4][1]["data"]["messages"][0]["data"]["content"] == "这是一个测试回复"
-
-        resume_response = client.post(
-            "/api/chat/resume/stream",
-            json={
-                "thread_id": "t-1",
-                "interrupt_id": "interrupt-city",
-                "answer": "杭州",
-                "locale": "zh-CN",
-                "session_meta": {},
-            },
-        )
-        assert resume_response.status_code == 200
-        resume_events = _parse_sse(resume_response.text)
-        assert resume_events == [
-            (
-                "interrupt",
-                {
-                    "kind": "clarification",
-                    "interrupt_id": "interrupt-city",
-                    "question": "请问你想查哪个城市的天气？",
-                    "missing_field": "city",
-                    "suggested_replies": ["杭州", "上海"],
-                    "allow_custom_input": True,
-                },
-            )
-        ]
+        assert names == ["turn.start", "part.delta", "tool.start", "part.delta", "tool.done", "message.completed", "turn.done"]
+        assert events[0][1]["assistant_message"]["status"] == "streaming"
+        assert events[1][1]["text_delta"] == "这是"
+        assert events[2][1]["part"]["tool_name"] == "get_current_time"
+        assert events[4][1]["part"]["output"]["time"] == "21:02:21"
+        assert events[5][1]["message"]["text"] == "这是一个测试回复"
 
         list_res = client.get("/api/sessions")
         assert list_res.status_code == 200
@@ -464,7 +389,7 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
         regenerate_res = client.post("/api/sessions/t-1/messages/msg-assistant-1/regenerate/stream")
         assert regenerate_res.status_code == 200
         regenerate_events = _parse_sse(regenerate_res.text)
-        assert [event[0] for event in regenerate_events] == ["messages", "values"]
+        assert [event[0] for event in regenerate_events] == ["turn.start", "part.delta", "message.completed", "turn.done"]
 
         switch_version_res = client.patch(
             "/api/sessions/t-1/messages/msg-assistant-1/current-version",
@@ -554,7 +479,7 @@ def test_chat_stream_hides_internal_exception_details(monkeypatch: pytest.Monkey
     class _CrashedService(_FakeService):
         async def stream_invoke(self, _user_id: str, _payload):
             if False:
-                yield "values", {}
+                yield "turn.start", {}
             raise RuntimeError("provider exploded with internal details")
 
     fake_service = _CrashedService()

@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from app.agent.service import TravelAgentService
 from app.api.deps import get_agent_service, get_current_user
 from app.schemas.auth import AuthUser
-from app.schemas.chat import ChatInvokeRequest, ChatResumeRequest, ListChatModelProfilesResponse, StreamErrorPayload
+from app.schemas.chat import ChatInvokeRequest, ListChatModelProfilesResponse, StreamErrorPayload
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 GENERIC_STREAM_ERROR_MESSAGE = "请求失败，请稍后重试。"
@@ -49,39 +49,6 @@ async def stream_chat(
     async def _stream() -> AsyncIterator[bytes]:
         try:
             async for event_name, event_payload in service.stream_invoke(current_user.id, payload):
-                yield _encode_sse(event_name, event_payload)
-        except asyncio.CancelledError:  # pragma: no cover - 由客户端中断触发
-            return
-        except ValueError as exc:
-            yield _encode_sse("error", StreamErrorPayload(message=str(exc)).model_dump())
-        except Exception:  # pragma: no cover - defensive boundary
-            yield _encode_sse(
-                "error",
-                StreamErrorPayload(message=GENERIC_STREAM_ERROR_MESSAGE).model_dump(),
-            )
-
-    return StreamingResponse(
-        _stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@router.post("/resume/stream")
-async def resume_chat(
-    payload: ChatResumeRequest,
-    service: TravelAgentService = Depends(get_agent_service),
-    current_user: AuthUser = Depends(get_current_user),
-) -> StreamingResponse:
-    """恢复被 interrupt 暂停的聊天流程。"""
-
-    async def _stream() -> AsyncIterator[bytes]:
-        try:
-            async for event_name, event_payload in service.stream_resume(current_user.id, payload):
                 yield _encode_sse(event_name, event_payload)
         except asyncio.CancelledError:  # pragma: no cover - 由客户端中断触发
             return

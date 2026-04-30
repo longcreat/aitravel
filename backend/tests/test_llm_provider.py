@@ -64,7 +64,12 @@ def test_load_llm_profile_registry_reads_standard_and_thinking_profiles(monkeypa
 def test_profile_resolution_and_configurable_values(monkeypatch):
     monkeypatch.delenv("LLM_PROFILE_DEFAULT", raising=False)
     monkeypatch.delenv("LLM_PROFILE_STANDARD_MODEL", raising=False)
+    monkeypatch.delenv("LLM_PROFILE_STANDARD_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_PROFILE_STANDARD_TEMPERATURE", raising=False)
     monkeypatch.delenv("LLM_PROFILE_THINKING_MODEL", raising=False)
+    monkeypatch.delenv("LLM_PROFILE_THINKING_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_PROFILE_THINKING_TEMPERATURE", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("LLM_MODEL", "shared-model")
     monkeypatch.setenv("LLM_MODEL_PROVIDER", "openai")
     monkeypatch.setenv("LLM_TEMPERATURE", "0.2")

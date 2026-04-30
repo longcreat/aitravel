@@ -1,6 +1,5 @@
 import type {
   ChatInvokeRequest,
-  ChatResumeRequest,
   ChatStreamEvent,
   ListChatModelProfilesResponse,
   PersistedChatMessage,
@@ -31,7 +30,15 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-const knownEventNames: StreamEventName[] = ["messages", "updates", "values", "interrupt", "error"];
+const knownEventNames: StreamEventName[] = [
+  "turn.start",
+  "part.delta",
+  "tool.start",
+  "tool.done",
+  "message.completed",
+  "turn.done",
+  "error",
+];
 
 function isKnownEventName(name: string): name is StreamEventName {
   return knownEventNames.includes(name as StreamEventName);
@@ -66,19 +73,39 @@ function toStreamEvent(eventName: string, rawData: string): ChatStreamEvent | nu
     return null;
   }
 
-  const parsed = JSON.parse(rawData) as ChatStreamEvent["data"];
+  let parsed: ChatStreamEvent["data"];
+  try {
+    parsed = JSON.parse(rawData) as ChatStreamEvent["data"];
+  } catch {
+    return null;
+  }
   return {
     event: eventName,
     data: parsed,
   } as ChatStreamEvent;
 }
 
-export async function streamChat(payload: ChatInvokeRequest, options: StreamChatOptions): Promise<void> {
-  return streamSse("/api/chat/stream", payload, options);
+function waitForNextPaintOpportunity(): Promise<void> {
+  if (typeof requestAnimationFrame !== "function") {
+    return new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  }
+
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      globalThis.setTimeout(resolve, 0);
+    });
+  });
 }
 
-export async function streamChatResume(payload: ChatResumeRequest, options: StreamChatOptions): Promise<void> {
-  return streamSse("/api/chat/resume/stream", payload, options);
+async function dispatchStreamEvent(streamEvent: ChatStreamEvent, options: StreamChatOptions): Promise<void> {
+  options.onEvent(streamEvent);
+  if (streamEvent.event === "tool.start") {
+    await waitForNextPaintOpportunity();
+  }
+}
+
+export async function streamChat(payload: ChatInvokeRequest, options: StreamChatOptions): Promise<void> {
+  return streamSse("/api/chat/stream", payload, options);
 }
 
 export async function listChatModelProfiles(): Promise<ListChatModelProfilesResponse> {
@@ -137,7 +164,7 @@ async function streamSse(path: string, payload: unknown, options: StreamChatOpti
       if (!streamEvent) {
         continue;
       }
-      options.onEvent(streamEvent);
+      await dispatchStreamEvent(streamEvent, options);
     }
   }
 
@@ -148,7 +175,7 @@ async function streamSse(path: string, payload: unknown, options: StreamChatOpti
   }
   const streamEvent = toStreamEvent(tail.event, tail.data);
   if (streamEvent) {
-    options.onEvent(streamEvent);
+    await dispatchStreamEvent(streamEvent, options);
   }
 }
 

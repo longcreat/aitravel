@@ -8,12 +8,38 @@ import { ChatMessage } from "@/features/chat/ui/chat-message";
 import { AppSurfaceOverlayRootContext } from "@/shared/layouts/app-surface-overlay";
 
 const emptyMeta: ChatMetaInfo = {
-  tool_traces: [],
-  step_groups: [],
-  render_segments: [],
   mcp_connected_servers: [],
   mcp_errors: [],
 };
+
+function textPart(id: string, text: string, status: "streaming" | "completed" | "stopped" | "failed" = "completed") {
+  return { id, type: "text" as const, text, status };
+}
+
+function reasoningPart(id: string, text: string, status: "streaming" | "completed" | "stopped" | "failed" = "completed") {
+  return { id, type: "reasoning" as const, text, status };
+}
+
+function toolPart(
+  id: string,
+  toolName: string,
+  options?: {
+    input?: unknown;
+    output?: unknown;
+    status?: "running" | "success" | "error";
+    toolCallId?: string;
+  },
+) {
+  return {
+    id,
+    type: "tool" as const,
+    tool_call_id: options?.toolCallId ?? id,
+    tool_name: toolName,
+    input: options?.input,
+    output: options?.output,
+    status: options?.status ?? "success",
+  };
+}
 
 function renderWithOverlayRoot(ui: ReactElement) {
   const overlayRoot = document.createElement("div");
@@ -200,62 +226,49 @@ describe("ChatMessage", () => {
     expect(onRegenerate).not.toHaveBeenCalled();
   });
 
-  it("renders grouped step entry and opens bottom summary dialog", async () => {
+  it("renders tool parts inline and opens the tool detail panel", async () => {
     const message: ChatMessageItem = {
       id: "assistant-steps",
       role: "assistant",
       text: "你好！让我查一下当前位置天气。根据查询结果，今天适合出门。",
-      meta: {
-        ...emptyMeta,
-        step_groups: [
-          {
-            id: "step-1",
-            items: [
-              {
-                id: "call-1",
-                tool_name: "amap-mcp-server_maps_weather",
-                status: "success",
-                summary: "Fetched weather data",
-              },
-              {
-                id: "call-2",
-                tool_name: "amap-mcp-server_maps_reverse_geocode",
-                status: "success",
-                summary: "Resolved current city",
-              },
-            ],
-          },
-        ],
-        render_segments: [
-          {
-            type: "text",
-            text: "你好！让我查一下当前位置天气。",
-          },
-          {
-            type: "step",
-            step_group_id: "step-1",
-          },
-          {
-            type: "text",
-            text: "根据查询结果，今天适合出门。",
-          },
-        ],
-      },
+      parts: [
+        textPart("text-1", "你好！让我查一下当前位置天气。"),
+        toolPart("tool-weather", "amap-mcp-server_maps_weather", {
+          input: { city: "杭州" },
+          output: "杭州晴，26℃",
+          status: "success",
+          toolCallId: "call-1",
+        }),
+        toolPart("tool-geocode", "amap-mcp-server_maps_reverse_geocode", {
+          input: { lat: 30.27, lng: 120.15 },
+          output: "杭州市西湖区",
+          status: "success",
+          toolCallId: "call-2",
+        }),
+        textPart("text-2", "根据查询结果，今天适合出门。"),
+      ],
     };
 
     renderWithOverlayRoot(<ChatMessage message={message} />);
 
     expect(screen.getByText("你好！让我查一下当前位置天气。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "open-step-summary-assistant-steps-step-1" })).toHaveTextContent("高德地图 · 天气查询 +1");
+    // Consecutive tools are grouped: shows first name + "+1"
+    const groupButton = screen.getByRole("button", { name: "open-tool-group-assistant-steps-1" });
+    expect(groupButton).toHaveTextContent("高德地图 · 天气查询");
+    expect(groupButton).toHaveTextContent("+1");
     expect(screen.getByText("根据查询结果，今天适合出门。")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "open-step-summary-assistant-steps-step-1" }));
+    // Click the group button → opens group list
+    await userEvent.click(groupButton);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toBeInTheDocument();
 
-    expect(await screen.findByText("Summary")).toBeInTheDocument();
-    expect(screen.getByText("高德地图 · 天气查询")).toBeInTheDocument();
-    expect(screen.getByText("Fetched weather data")).toBeInTheDocument();
-    expect(screen.getByText("高德地图 · 逆地理编码")).toBeInTheDocument();
-    expect(screen.getByText("Resolved current city")).toBeInTheDocument();
+    // Click the first tool in the list → opens detail
+    const weatherItem = within(dialog).getByText("高德地图 · 天气查询").closest("button");
+    await userEvent.click(weatherItem!);
+
+    expect(screen.getByText(/"city": "杭州"/)).toBeInTheDocument();
+    expect(screen.getByText("杭州晴，26℃")).toBeInTheDocument();
   });
 
   it("falls back to a readable label when no chinese mapping exists", async () => {
@@ -263,90 +276,43 @@ describe("ChatMessage", () => {
       id: "assistant-unknown-tool",
       role: "assistant",
       text: "我来继续处理。",
-      meta: {
-        ...emptyMeta,
-        step_groups: [
-          {
-            id: "step-unknown",
-            items: [
-              {
-                id: "call-unknown",
-                tool_name: "custom_tool_name",
-                status: "success",
-                summary: "Completed",
-              },
-            ],
-          },
-        ],
-        render_segments: [
-          {
-            type: "step",
-            step_group_id: "step-unknown",
-          },
-        ],
-      },
+      parts: [toolPart("tool-unknown", "custom_tool_name", { input: { value: 1 }, output: "Completed" })],
     };
 
     renderWithOverlayRoot(<ChatMessage message={message} />);
 
-    expect(screen.getByRole("button", { name: "open-step-summary-assistant-unknown-tool-step-unknown" })).toHaveTextContent("custom tool name");
+    // Single tool in group: button shows the fallback name
+    const groupButton = screen.getByRole("button", { name: "open-tool-group-assistant-unknown-tool-0" });
+    expect(groupButton).toHaveTextContent("custom tool name");
 
-    await userEvent.click(screen.getByRole("button", { name: "open-step-summary-assistant-unknown-tool-step-unknown" }));
+    // Single tool group → click goes directly to detail
+    await userEvent.click(groupButton);
 
+    // The dialog title also shows the tool name
     expect(await screen.findAllByText("custom tool name")).toHaveLength(2);
   });
 
-  it("formats object tool payload in the summary detail panel", async () => {
+  it("formats object tool payload in the tool detail panel", async () => {
     const message: ChatMessageItem = {
       id: "assistant-exa-tool",
       role: "assistant",
       text: "我先帮你查一下网页资料。",
-      meta: {
-        ...emptyMeta,
-        tool_traces: [
-          {
-            phase: "called",
-            tool_name: "exa_web_search_advanced_exa",
-            payload: { query: "京都攻略", num_results: 3 },
-            tool_call_id: "call-exa-1",
-            result_status: null,
+      parts: [
+        toolPart("tool-exa", "exa_web_search_advanced_exa", {
+          toolCallId: "call-exa-1",
+          input: { query: "京都攻略", num_results: 3 },
+          output: {
+            kind: "exa_search",
+            results: [{ title: "Kyoto Guide", url: "https://example.com/kyoto" }],
           },
-          {
-            phase: "returned",
-            tool_name: "exa_web_search_advanced_exa",
-            payload: {
-              kind: "exa_search",
-              results: [{ title: "Kyoto Guide", url: "https://example.com/kyoto" }],
-            },
-            tool_call_id: "call-exa-1",
-            result_status: "success",
-          },
-        ],
-        step_groups: [
-          {
-            id: "step-exa",
-            items: [
-              {
-                id: "call-exa-1",
-                tool_name: "exa_web_search_advanced_exa",
-                status: "success",
-                summary: "Exa 高级搜索找到 1 条结果。",
-              },
-            ],
-          },
-        ],
-        render_segments: [{ type: "step", step_group_id: "step-exa" }],
-      },
+        }),
+      ],
     };
 
     renderWithOverlayRoot(<ChatMessage message={message} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "open-step-summary-assistant-exa-tool-step-exa" }));
-    const dialog = await screen.findByRole("dialog");
-    const toolLabel = within(dialog).getByText("Exa · 高级网络搜索");
-    const toolButton = toolLabel.closest("button");
-    expect(toolButton).not.toBeNull();
-    await userEvent.click(toolButton!);
+    // Single tool group → click goes directly to detail
+    await userEvent.click(screen.getByRole("button", { name: "open-tool-group-assistant-exa-tool-0" }));
 
     expect(await screen.findByText(/"kind": "exa_search"/)).toBeInTheDocument();
     expect(screen.getByText(/"title": "Kyoto Guide"/)).toBeInTheDocument();
@@ -358,11 +324,7 @@ describe("ChatMessage", () => {
       id: "assistant-reasoning",
       role: "assistant",
       text: "这是最终答复。",
-      meta: {
-        ...emptyMeta,
-        reasoning_text: "先拆解问题，再整理答复。",
-        reasoning_state: "completed",
-      },
+      parts: [reasoningPart("reasoning-1", "先拆解问题，再整理答复。"), textPart("text-1", "这是最终答复。")],
     };
 
     renderWithOverlayRoot(<ChatMessage message={message} />);
@@ -371,36 +333,6 @@ describe("ChatMessage", () => {
     expect(screen.getByText("已完成")).toBeInTheDocument();
     expect(screen.getByText("先拆解问题，再整理答复。")).toBeInTheDocument();
     expect(screen.getByText("这是最终答复。")).toBeInTheDocument();
-  });
-
-  it("renders clarification replies for interrupt messages and forwards the selected reply", async () => {
-    const onSelectClarificationReply = vi.fn();
-
-    const message: ChatMessageItem = {
-      id: "assistant-interrupt",
-      role: "assistant",
-      text: "请问你想查哪个城市的天气？",
-      interrupt: {
-        kind: "clarification",
-        interrupt_id: "interrupt-city",
-        question: "请问你想查哪个城市的天气？",
-        missing_field: "city",
-        suggested_replies: ["杭州", "上海"],
-        allow_custom_input: true,
-      },
-      meta: { ...emptyMeta },
-    };
-
-    renderWithOverlayRoot(
-      <ChatMessage message={message} onSelectClarificationReply={onSelectClarificationReply} />,
-    );
-
-    expect(screen.getByText("请问你想查哪个城市的天气？")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "copy-message-assistant-interrupt" })).not.toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "杭州" }));
-
-    expect(onSelectClarificationReply).toHaveBeenCalledWith("assistant-interrupt", "杭州");
   });
 
   it("shows stop icon when current speech is playing", () => {

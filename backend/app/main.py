@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.env import load_app_env
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.deps import get_agent_service
@@ -27,6 +28,7 @@ async def lifespan(_app: FastAPI):
 
 def create_app() -> FastAPI:
     """创建 FastAPI 应用实例并注册路由与生命周期事件。"""
+    load_app_env()
     bootstrap_sqlite_database()
     app = FastAPI(title="AI Travel Agent API", version="0.1.0", lifespan=lifespan)
 

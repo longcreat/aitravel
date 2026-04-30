@@ -84,8 +84,15 @@ class AgentRuntimeService:
         if self._runtime is None:
             return
 
-        if self._runtime.mcp_bundle.client:
-            close_method = getattr(self._runtime.mcp_bundle.client, "close", None)
+        clients = self._runtime.mcp_bundle.clients or (
+            [self._runtime.mcp_bundle.client] if self._runtime.mcp_bundle.client else []
+        )
+        seen_client_ids: set[int] = set()
+        for client in clients:
+            if client is None or id(client) in seen_client_ids:
+                continue
+            seen_client_ids.add(id(client))
+            close_method = getattr(client, "close", None)
             if close_method:
                 maybe_result = close_method()
                 if hasattr(maybe_result, "__await__"):

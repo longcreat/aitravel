@@ -136,7 +136,7 @@ def test_sqlite_store_bootstraps_from_versioned_schema(tmp_path: Path) -> None:
     assert applied_initial == [1]
 
     applied_remaining = run_sqlite_migrations(db_path)
-    assert applied_remaining == [2, 3, 4]
+    assert applied_remaining == [2, 3, 4, 5]
 
     store = ChatSQLiteStore(db_path)
     auth_store = AuthSQLiteStore(db_path)

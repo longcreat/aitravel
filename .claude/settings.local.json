@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_agent_service.py tests/test_agent_streaming.py -v)",
+      "Bash(python -m pytest tests/ -v)"
+    ]
+  }
+}

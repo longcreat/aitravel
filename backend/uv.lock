@@ -10,6 +10,7 @@ dependencies = [
     { name = "boto3" },
     { name = "dashscope" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
@@ -19,6 +20,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyjwt" },
+    { name = "python-dotenv" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -33,6 +35,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.39.0,<2.0.0" },
     { name = "dashscope", specifier = ">=1.25.2,<2.0.0" },
     { name = "fastapi", specifier = ">=0.116.0,<1.0.0" },
+    { name = "httpx", specifier = ">=0.28.0,<1.0.0" },
     { name = "langchain", specifier = "==1.2.15" },
     { name = "langchain-mcp-adapters", specifier = "==0.2.2" },
     { name = "langchain-openai", specifier = ">=0.3.30,<1.0.0" },
@@ -44,6 +47,7 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.10.1,<3.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0,<9.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.1.0,<2.0.0" },
+    { name = "python-dotenv", specifier = ">=1.2.2,<2.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0,<1.0.0" },
 ]
 provides-extras = ["dev"]
