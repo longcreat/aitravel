@@ -140,3 +140,30 @@ textarea {
   background-color: #9b9589;
   animation: typing-bounce 1.2s ease-in-out infinite;
 }
+
+/* Citation chips */
+.citation-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.2em;
+  height: 1.2em;
+  padding: 0 0.3em;
+  margin: 0 0.1em;
+  font-size: 0.75em;
+  font-weight: 600;
+  line-height: 1;
+  color: #177199;
+  text-decoration: none;
+  background: #e8f4fa;
+  border-radius: 4px;
+  vertical-align: super;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.citation-chip:hover {
+  background: #cce9f5;
+  color: #0c5577;
+  text-decoration: none;
+}

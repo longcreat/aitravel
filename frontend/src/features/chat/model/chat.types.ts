@@ -7,11 +7,22 @@ export type AssistantVersionFeedback = "up" | "down" | null;
 export type AssistantVersionSpeechStatus = "generating" | "ready" | "failed" | null;
 export type ChatMessageStatus = "streaming" | "completed" | "stopped" | "failed";
 
+export interface CitationSource {
+  type: "citation";
+  url: string;
+  title: string;
+  start_index?: number | null;
+  end_index?: number | null;
+  cited_text?: string | null;
+  extras?: Record<string, unknown>;
+}
+
 export type ChatMessagePart =
   | {
       id: string;
       type: "text";
       text: string;
+      annotations?: CitationSource[];
       status: ChatMessageStatus;
     }
   | {
@@ -27,6 +38,7 @@ export type ChatMessagePart =
       tool_name: string;
       input?: unknown;
       output?: unknown;
+      sources?: CitationSource[];
       status: "running" | "success" | "error";
     };
 
@@ -69,6 +81,7 @@ export type ChatStreamEvent =
         part_id: string;
         part_type: "text" | "reasoning";
         text_delta: string;
+        annotations?: CitationSource[];
         status: ChatMessageStatus;
       };
     }

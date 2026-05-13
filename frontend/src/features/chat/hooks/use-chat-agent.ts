@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAuth } from "@/features/auth/model/auth.context";
-import { consumePendingAuthMessage } from "@/features/auth/model/auth.storage";
+import { consumePendingAuthMessage, getStoredAccessToken } from "@/features/auth/model/auth.storage";
 import {
   deleteSession,
   getSession,
@@ -155,7 +155,7 @@ export function useChatAgent(initialThreadId?: string) {
   const canStartRequest = useMemo(() => ready && !loading, [loading, ready]);
 
   const refreshSessions = useCallback(async () => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !getStoredAccessToken()) {
       setSessions([]);
       setSessionsReady(true);
       return;

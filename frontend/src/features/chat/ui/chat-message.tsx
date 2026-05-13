@@ -27,10 +27,12 @@ const sanitizeSchema = {
 };
 
 import { getToolDisplayName } from "@/features/chat/model/tool-display-name";
-import type { ChatMessageItem } from "@/features/chat/model/chat.types";
+import { resolveToolCard } from "@/features/chat/model/tool-card-registry";
+import type { ChatMessageItem, CitationSource } from "@/features/chat/model/chat.types";
 import { useBrowser } from "@/shared/lib/browser";
 import { cn } from "@/shared/lib/cn";
 import { AppSurfaceSheet } from "@/shared/ui";
+import { HotelCardList } from "@/features/chat/ui/hotel-card-list";
 
 interface ChatMessageProps {
   message: ChatMessageItem;
@@ -68,11 +70,28 @@ async function copyPlainText(text: string) {
 function MarkdownBubble({
   content,
   isUser,
+  annotations,
 }: {
   content: string;
   isUser: boolean;
+  annotations?: CitationSource[];
 }) {
   const { openUrl } = useBrowser();
+
+  // Replace [src-N] markers with superscript citation links
+  const processedContent = annotations?.length
+    ? content.replace(/\[src-(\d+)\]/g, (match, numStr) => {
+        const idx = parseInt(numStr, 10);
+        // Find the annotation matching this exact marker
+        const target = annotations.find((a) => a.cited_text === match);
+        if (target) {
+          const escapedUrl = target.url.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+          const escapedTitle = target.title.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+          return `<a href="${escapedUrl}" title="${escapedTitle}" class="citation-chip">[${idx}]</a>`;
+        }
+        return match;
+      })
+    : content;
 
   return (
     <div className="max-w-none space-y-4 break-words text-base leading-[1.8] tracking-[0.01em] [line-break:auto] [text-wrap:pretty] [&_*]:break-words">
@@ -97,20 +116,47 @@ function MarkdownBubble({
               {children}
             </blockquote>
           ),
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              className={cn("font-medium underline underline-offset-2", isUser ? "text-[#0c5577]" : "text-[#177199]")}
-              onClick={(e) => {
-                if (href && /^https?:\/\//i.test(href)) {
-                  e.preventDefault();
-                  openUrl(href);
-                }
-              }}
-            >
-              {children}
-            </a>
-          ),
+          a: ({ href, children, className, title, ...rest }) => {
+            // Detect citation chip: text matches [N] pattern
+            const childText = typeof children === "string"
+              ? children
+              : Array.isArray(children) && children.length === 1 && typeof children[0] === "string"
+                ? children[0]
+                : "";
+            const isCitation = /^\[\d+\]$/.test(childText);
+            if (isCitation) {
+              return (
+                <a
+                  href={href}
+                  title={title}
+                  className="citation-chip"
+                  onClick={(e) => {
+                    if (href && /^https?:\/\//i.test(href)) {
+                      e.preventDefault();
+                      openUrl(href);
+                    }
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
+            return (
+              <a
+                href={href}
+                title={title}
+                className={cn("font-medium underline underline-offset-2", isUser ? "text-[#0c5577]" : "text-[#177199]")}
+                onClick={(e) => {
+                  if (href && /^https?:\/\//i.test(href)) {
+                    e.preventDefault();
+                    openUrl(href);
+                  }
+                }}
+              >
+                {children}
+              </a>
+            );
+          },
           hr: () => <div className={cn("my-3 h-px", isUser ? "bg-[#b7d6f1]" : "bg-[#e5eded]")} />,
           table: ({ children }) => (
             <div className="overflow-x-auto">
@@ -155,7 +201,7 @@ function MarkdownBubble({
           pre: ({ children }) => <pre className="overflow-x-auto">{children}</pre>,
         }}
       >
-        {content}
+        {processedContent}
       </ReactMarkdown>
     </div>
   );
@@ -312,7 +358,7 @@ export function ChatMessage({
           }
           if (group.kind === "text") {
             const textPart = group.parts[0] as Extract<(typeof messageParts)[number], { type: "text" }>;
-            return <MarkdownBubble key={textPart.id} content={textPart.text} isUser={false} />;
+            return <MarkdownBubble key={textPart.id} content={textPart.text} isUser={false} annotations={textPart.annotations} />;
           }
           // Tool group
           const toolParts = group.parts as ToolPart[];
@@ -320,30 +366,40 @@ export function ChatMessage({
           const extraCount = toolParts.length - 1;
           const hasRunning = toolParts.some((p) => p.status === "running");
           const hasError = toolParts.some((p) => p.status === "error");
+          // 尝试解析卡片数据（遵循主流 Agent 模式：tool_name → 类型路由 → 渲染）
+          const cardData = !hasRunning
+            ? toolParts.reduce<ReturnType<typeof resolveToolCard>>((found, p) => {
+                if (found) return found;
+                return resolveToolCard(p.tool_name, p.output);
+              }, null)
+            : null;
           return (
-            <button
-              key={firstTool.id}
-              type="button"
-              aria-label={`open-tool-group-${message.id}-${groupIdx}`}
-              className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[14px] font-medium text-[#7a766d] transition-colors hover:bg-[#f0ece4]"
-              onClick={() => {
-                setActiveToolGroupIndex(groupIdx);
-                if (toolParts.length === 1) setActiveToolDetailId(firstTool.id);
-              }}
-            >
-              {hasRunning ? (
-                <LoaderCircle className="h-4 w-4 animate-spin" />
-              ) : hasError ? (
-                <AlertTriangle className="h-4 w-4 text-[#bf5f4b]" />
-              ) : (
-                <CheckCircle2 className="h-4 w-4 text-[#6d8a6f]" />
-              )}
-              <span>{getToolDisplayName(firstTool.tool_name)}</span>
-              {extraCount > 0 && (
-                <span className="rounded-full bg-[#f0ece4] px-1.5 py-0.5 text-[11px] font-semibold text-[#8a857b]">+{extraCount}</span>
-              )}
-              <ChevronRight className="h-4 w-4 opacity-50" />
-            </button>
+            <div key={firstTool.id} className="space-y-1">
+              <button
+                type="button"
+                aria-label={`open-tool-group-${message.id}-${groupIdx}`}
+                className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[14px] font-medium text-[#7a766d] transition-colors hover:bg-[#f0ece4]"
+                onClick={() => {
+                  setActiveToolGroupIndex(groupIdx);
+                  if (toolParts.length === 1) setActiveToolDetailId(firstTool.id);
+                }}
+              >
+                {hasRunning ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : hasError ? (
+                  <AlertTriangle className="h-4 w-4 text-[#bf5f4b]" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4 text-[#6d8a6f]" />
+                )}
+                <span>{getToolDisplayName(firstTool.tool_name)}</span>
+                {extraCount > 0 && (
+                  <span className="rounded-full bg-[#f0ece4] px-1.5 py-0.5 text-[11px] font-semibold text-[#8a857b]">+{extraCount}</span>
+                )}
+                <ChevronRight className="h-4 w-4 opacity-50" />
+              </button>
+              {/* 卡片渲染：tool完成后内联展示结构化数据（对标 ChatGPT / Kimi / Doubao） */}
+              {cardData?.type === "hotel_list" && <HotelCardList items={cardData.items} />}
+            </div>
           );
         })}
       </div>

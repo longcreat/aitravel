@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
 import json
+import re
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage, message_to_dict
@@ -18,6 +19,7 @@ from app.schemas.chat import (
     ChatReasoningPart,
     ChatTextPart,
     ChatToolPart,
+    CitationSource,
     PartDeltaPayload,
     ToolPartPayload,
     ToolTrace,
@@ -35,6 +37,7 @@ class StreamRunState:
     seen_returned: set[str] = field(default_factory=set)
     text_part_index: int = 0
     reasoning_part_index: int = 0
+    citation_sources: list[CitationSource] = field(default_factory=list)
 
 
 class AgentStreamService:
@@ -106,12 +109,16 @@ class AgentStreamService:
                         yield "part.delta", delta_payload.model_dump()
 
             if part_type == "updates":
-                for _, _, trace in _extract_tool_events(
+                for event_type, _, trace in _extract_tool_events(
                     raw_data,
                     seen_called=state.seen_called,
                     seen_returned=state.seen_returned,
                 ):
                     state.streamed_tool_traces.append(trace)
+                    # 工具返回时提取引用来源
+                    if event_type == "tool_returned":
+                        sources = _extract_citation_sources_from_trace(trace)
+                        state.citation_sources.extend(sources)
                     tool_payload = _trace_to_tool_part_payload(
                         state,
                         assistant_message_id=assistant_message_id,
@@ -381,6 +388,10 @@ def _trace_to_tool_part_payload(
     existing.tool_name = trace.tool_name
     existing.output = trace.payload
     existing.status = "error" if trace.result_status == "error" else "success"
+    # Attach extracted sources to the tool part
+    sources = _extract_citation_sources_from_trace(trace)
+    if sources:
+        existing.sources = sources
     return ToolPartPayload(message_id=assistant_message_id, version_id=version_id, part=existing)
 
 
@@ -438,3 +449,80 @@ def _serialize_native_value(value: Any) -> Any:
     if isinstance(value, set):
         return [_serialize_native_value(item) for item in value]
     return value
+
+
+# ---------------------------------------------------------------------------
+# Citation source extraction
+# ---------------------------------------------------------------------------
+
+_SRC_MARKER_RE = re.compile(r"\[src-(\d+)\]")
+
+
+def _extract_citation_sources_from_trace(trace: ToolTrace) -> list[CitationSource]:
+    """从工具返回的 payload（artifact）中提取引用来源。"""
+    payload = trace.payload
+    if payload is None:
+        return []
+
+    # If payload is a JSON string, try to parse it
+    if isinstance(payload, str):
+        payload = payload.strip()
+        if payload.startswith(("{", "[")):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, ValueError):
+                return []
+        else:
+            return []
+
+    sources: list[CitationSource] = []
+
+    # Exa 搜索结果 artifact: dict with "results" list
+    if isinstance(payload, dict):
+        results = payload.get("results")
+        if isinstance(results, list):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("url")
+                title = item.get("title") or url or ""
+                if url:
+                    sources.append(CitationSource(url=str(url), title=str(title)))
+            if sources:
+                return sources
+
+    # MCP 工具: payload 为 list[dict] 如酒店列表，检查 bookingUrl/url 字段
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("bookingUrl") or item.get("url") or item.get("link")
+            title = item.get("hotelName") or item.get("name") or item.get("title") or ""
+            if url:
+                sources.append(CitationSource(url=str(url), title=str(title)))
+        return sources
+
+    return sources
+
+
+def resolve_annotations_from_text(
+    text: str,
+    sources: list[CitationSource],
+) -> list[CitationSource]:
+    """扫描文本中的 [src-N] 标记，生成带 start_index/end_index 的 annotations。"""
+    annotations: list[CitationSource] = []
+    for match in _SRC_MARKER_RE.finditer(text):
+        idx = int(match.group(1))
+        if idx < 1 or idx > len(sources):
+            continue
+        source = sources[idx - 1]
+        annotations.append(
+            CitationSource(
+                url=source.url,
+                title=source.title,
+                start_index=match.start(),
+                end_index=match.end(),
+                cited_text=match.group(0),
+            )
+        )
+    return annotations

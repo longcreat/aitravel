@@ -361,4 +361,107 @@ describe("ChatMessage", () => {
 
     expect(screen.getByRole("button", { name: "stop-speech-message-persisted-msg-77" })).toBeInTheDocument();
   });
+
+  it("renders hotel cards inline when tool output matches hotel schema", () => {
+    const hotelOutput = JSON.stringify([
+      { name: "如家酒店", price: 299, rating: 4.5, address: "北京朝阳区", star: 3, tags: ["近地铁", "含早"] },
+      { name: "汉庭酒店", price: 259, rating: 4.2, address: "北京海淀区", star: 3 },
+    ]);
+
+    const message: ChatMessageItem = {
+      id: "assistant-hotel",
+      role: "assistant",
+      text: "我找到了以下酒店推荐：",
+      parts: [
+        toolPart("tool-hotel-1", "rollinggo-hotel_searchHotels", {
+          input: { city: "北京", checkIn: "2026-05-01" },
+          output: hotelOutput,
+          status: "success",
+          toolCallId: "call-hotel-1",
+        }),
+        textPart("text-1", "我找到了以下酒店推荐："),
+      ],
+    };
+
+    renderWithOverlayRoot(<ChatMessage message={message} />);
+
+    // Hotel cards rendered inline
+    expect(screen.getByText("如家酒店")).toBeInTheDocument();
+    expect(screen.getByText("汉庭酒店")).toBeInTheDocument();
+    expect(screen.getByText("¥299")).toBeInTheDocument();
+    expect(screen.getByText("¥259")).toBeInTheDocument();
+    expect(screen.getByText("北京朝阳区")).toBeInTheDocument();
+    expect(screen.getByText("近地铁")).toBeInTheDocument();
+    expect(screen.getByText("含早")).toBeInTheDocument();
+    expect(screen.getByText("共 2 家酒店")).toBeInTheDocument();
+    // Tool button still clickable for details
+    expect(screen.getByRole("button", { name: "open-tool-group-assistant-hotel-0" })).toBeInTheDocument();
+  });
+
+  it("does not render hotel cards for non-hotel tools", () => {
+    const message: ChatMessageItem = {
+      id: "assistant-weather",
+      role: "assistant",
+      text: "查询完成。",
+      parts: [
+        toolPart("tool-weather", "amap-mcp-server_maps_weather", {
+          input: { city: "杭州" },
+          output: JSON.stringify([{ name: "杭州市", price: 0, address: "浙江" }]),
+          status: "success",
+          toolCallId: "call-w-1",
+        }),
+        textPart("text-1", "查询完成。"),
+      ],
+    };
+
+    renderWithOverlayRoot(<ChatMessage message={message} />);
+
+    // Should NOT render hotel cards (tool name doesn't match 'hotel')
+    expect(screen.queryByText("共 1 家酒店")).not.toBeInTheDocument();
+  });
+
+  it("renders citation chips for text parts with annotations", () => {
+    const message: ChatMessageItem = {
+      id: "assistant-cite",
+      role: "assistant",
+      text: "三亚湾希尔顿评分4.8[src-1]，海棠湾万豪也不错[src-2]。",
+      parts: [
+        {
+          id: "text-1",
+          type: "text" as const,
+          text: "三亚湾希尔顿评分4.8[src-1]，海棠湾万豪也不错[src-2]。",
+          status: "completed" as const,
+          annotations: [
+            {
+              type: "citation" as const,
+              url: "https://hilton.com/sanya",
+              title: "三亚希尔顿",
+              start_index: 11,
+              end_index: 18,
+              cited_text: "[src-1]",
+            },
+            {
+              type: "citation" as const,
+              url: "https://marriott.com/haitang",
+              title: "海棠湾万豪",
+              start_index: 26,
+              end_index: 33,
+              cited_text: "[src-2]",
+            },
+          ],
+        },
+      ],
+      meta: { ...emptyMeta },
+    };
+
+    renderWithOverlayRoot(<ChatMessage message={message} />);
+
+    // Citation chips should be rendered as links with correct href
+    const chips = screen.getAllByText(/^\[\d+\]$/);
+    expect(chips.length).toBe(2);
+    expect(chips[0].closest("a")).toHaveAttribute("href", "https://hilton.com/sanya");
+    expect(chips[1].closest("a")).toHaveAttribute("href", "https://marriott.com/haitang");
+    // Verify chip class for styling
+    expect(chips[0].closest("a")).toHaveClass("citation-chip");
+  });
 });

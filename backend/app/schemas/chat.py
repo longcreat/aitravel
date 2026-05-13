@@ -48,12 +48,25 @@ class ChatMetaInfo(BaseModel):
     mcp_errors: list[str] = Field(default_factory=list)
 
 
+class CitationSource(BaseModel):
+    """引用来源（遵循 LangChain Citation 标准）。"""
+
+    type: Literal["citation"] = "citation"
+    url: str
+    title: str
+    start_index: int | None = None
+    end_index: int | None = None
+    cited_text: str | None = None
+    extras: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatTextPart(BaseModel):
     """前端可直接渲染的文本片段。"""
 
     id: str
     type: Literal["text"] = "text"
     text: str = ""
+    annotations: list[CitationSource] = Field(default_factory=list)
     status: Literal["streaming", "completed", "stopped", "failed"] = "completed"
 
 
@@ -75,6 +88,7 @@ class ChatToolPart(BaseModel):
     tool_name: str
     input: Any = None
     output: Any = None
+    sources: list[CitationSource] = Field(default_factory=list)
     status: Literal["running", "success", "error"] = "running"
 
 
@@ -143,6 +157,7 @@ class PartDeltaPayload(BaseModel):
     part_id: str
     part_type: Literal["text", "reasoning"]
     text_delta: str
+    annotations: list[CitationSource] = Field(default_factory=list)
     status: Literal["streaming", "completed", "stopped", "failed"] = "streaming"
 
 

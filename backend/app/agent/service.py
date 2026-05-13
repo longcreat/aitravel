@@ -13,7 +13,7 @@ from app.agent.checkpoints import AgentCheckpointService
 from app.agent.context import AgentRequestContext
 from app.agent.presentation import _content_to_text, build_final_response
 from app.agent.runtime import AgentRuntimeService
-from app.agent.streaming import AgentStreamService, StreamRunState
+from app.agent.streaming import AgentStreamService, StreamRunState, resolve_annotations_from_text
 from app.llm.provider import (
     coerce_llm_profile_key,
     get_default_llm_profile_key,
@@ -26,6 +26,7 @@ from app.schemas.chat import (
     ChatMessagePart,
     ChatReasoningPart,
     ChatTextPart,
+    CitationSource,
     ChatInvokeRequest,
     ChatModelProfile,
     MessageCompletedPayload,
@@ -45,25 +46,34 @@ def _finalize_ui_parts(
     parts: list[ChatMessagePart],
     assistant_text: str,
     reasoning_text: str | None,
+    citation_sources: list[CitationSource] | None = None,
 ) -> list[ChatMessagePart]:
-    """返回完成态 UI parts，必要时从最终文本补齐。"""
+    """返回完成态 UI parts，必要时从最终文本补齐，并解析引用注解。"""
+    sources = citation_sources or []
+
     if not parts:
         completed: list[ChatMessagePart] = []
         if reasoning_text:
             completed.append(ChatReasoningPart(id="reasoning-1", text=reasoning_text, status="completed"))
         if assistant_text:
-            completed.append(ChatTextPart(id="text-1", text=assistant_text, status="completed"))
+            annotations = resolve_annotations_from_text(assistant_text, sources) if sources else []
+            completed.append(ChatTextPart(id="text-1", text=assistant_text, status="completed", annotations=annotations))
         return completed
 
     finalized: list[ChatMessagePart] = []
     for part in parts:
         if part.type in {"text", "reasoning"}:
             part.status = "completed"  # type: ignore[attr-defined]
+        # 为 text part 解析引用注解
+        if part.type == "text" and sources:
+            annotations = resolve_annotations_from_text(part.text, sources)  # type: ignore[attr-defined]
+            part.annotations = annotations  # type: ignore[attr-defined]
         finalized.append(part)
 
     has_text = any(part.type == "text" and getattr(part, "text", "") for part in finalized)
     if assistant_text and not has_text:
-        finalized.append(ChatTextPart(id="text-1", text=assistant_text, status="completed"))
+        annotations = resolve_annotations_from_text(assistant_text, sources) if sources else []
+        finalized.append(ChatTextPart(id="text-1", text=assistant_text, status="completed", annotations=annotations))
     return finalized
 
 
@@ -196,6 +206,7 @@ class TravelAgentService:
         parts: list[ChatMessagePart],
         result_checkpoint_id: str | None,
         speech_job_id: str,
+        citation_sources: list[CitationSource] | None = None,
     ) -> PersistedChatMessage:
         """完成一次流式 assistant 回复并返回稳定展示态。"""
         message = self._chat_store.complete_assistant_message(
@@ -204,7 +215,7 @@ class TravelAgentService:
             assistant_message_id,
             version_id,
             text=final_response.assistant_message,
-            parts=_finalize_ui_parts(parts, final_response.assistant_message, final_response.meta.reasoning_text),
+            parts=_finalize_ui_parts(parts, final_response.assistant_message, final_response.meta.reasoning_text, citation_sources),
             meta=final_response.meta.model_dump(),
             result_checkpoint_id=result_checkpoint_id,
         )
@@ -324,6 +335,7 @@ class TravelAgentService:
                 parts=state.ui_parts,
                 result_checkpoint_id=result_checkpoint_id,
                 speech_job_id=speech_job_id,
+                citation_sources=state.citation_sources,
             )
         except Exception:
             self._speech_service.cancel_generation(speech_job_id)
@@ -456,6 +468,7 @@ class TravelAgentService:
                 parts=state.ui_parts,
                 result_checkpoint_id=result_checkpoint_id,
                 speech_job_id=speech_job_id,
+                citation_sources=state.citation_sources,
             )
         except Exception:
             self._speech_service.cancel_generation(speech_job_id)
