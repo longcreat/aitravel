@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "amplitude-mcp": {
+      "type": "http",
+      "url": "https://mcp.amplitude.com/mcp",
+      "autoApprove": [
+        "get_context",
+        "search",
+        "query_dataset"
+      ]
+    }
+  }
+}

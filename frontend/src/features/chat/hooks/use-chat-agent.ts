@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAuth } from "@/features/auth/model/auth.context";
 import { consumePendingAuthMessage, getStoredAccessToken } from "@/features/auth/model/auth.storage";
+import { trackEvent } from "@/shared/lib/analytics";
 import {
   deleteSession,
   getSession,
@@ -219,6 +220,7 @@ export function useChatAgent(initialThreadId?: string) {
     setMessages([]);
     setError(null);
     setSelectedModelProfileKey(defaultModelProfileKey);
+    trackEvent("session_new", { thread_id: nextThreadId });
     return nextThreadId;
   }, [defaultModelProfileKey]);
 
@@ -242,6 +244,7 @@ export function useChatAgent(initialThreadId?: string) {
   const renameSessionTitle = useCallback(
     async (targetThreadId: string, title: string) => {
       await renameSession(targetThreadId, title);
+      trackEvent("session_rename", { thread_id: targetThreadId });
       await refreshSessions();
     },
     [refreshSessions],
@@ -250,6 +253,7 @@ export function useChatAgent(initialThreadId?: string) {
   const removeSession = useCallback(
     async (targetThreadId: string) => {
       await deleteSession(targetThreadId);
+      trackEvent("session_delete", { thread_id: targetThreadId });
       if (targetThreadId === threadId) startNewSession();
       await refreshSessions();
     },
@@ -264,6 +268,11 @@ export function useChatAgent(initialThreadId?: string) {
       const previousModelProfileKey = selectedModelProfileKey;
       try {
         await updateSessionModelProfile(threadId, { model_profile_key: nextModelProfileKey });
+        trackEvent("model_profile_changed", {
+          thread_id: threadId,
+          from: previousModelProfileKey,
+          to: nextModelProfileKey,
+        });
       } catch (updateError) {
         setSelectedModelProfileKey(previousModelProfileKey);
         setError(updateError instanceof Error ? updateError.message : "切换模型失败");
@@ -323,6 +332,13 @@ export function useChatAgent(initialThreadId?: string) {
     }
 
     if (event.event === "tool.start" || event.event === "tool.done") {
+      if (event.event === "tool.done") {
+        trackEvent("tool_invoked", {
+          tool_name: event.data.part.tool_name,
+          status: event.data.part.status,
+          thread_id: context.targetThreadId,
+        });
+      }
       patchMessage(event.data.message_id, (message) => ({
         ...message,
         parts: upsertToolPart(message.parts ?? [], event.data.part),
@@ -340,6 +356,10 @@ export function useChatAgent(initialThreadId?: string) {
     }
 
     if (event.event === "error") {
+      trackEvent("stream_error", {
+        thread_id: context.targetThreadId,
+        message: event.data.message,
+      });
       const fallbackAssistantMessage = context.fallbackAssistantMessage;
       if (fallbackAssistantMessage) {
         setMessages((prev) => prev.map((item) => (item.id === fallbackAssistantMessage.id ? fallbackAssistantMessage : item)));
@@ -397,6 +417,11 @@ export function useChatAgent(initialThreadId?: string) {
         });
 
       lastSubmittedMessageRef.current = normalized;
+      trackEvent("message_sent", {
+        thread_id: targetThreadId,
+        model_profile: effectiveModelProfileKey,
+        message_length: normalized.length,
+      });
       await streamChat(
         {
           thread_id: targetThreadId,
@@ -460,6 +485,7 @@ export function useChatAgent(initialThreadId?: string) {
     const fallbackAssistantMessage = messages.find((item) => item.id === `persisted-${messageId}`) ?? null;
     let regenerateContentStarted = false;
     try {
+      trackEvent("message_regenerate", { thread_id: threadId, message_id: messageId });
       await regenerateAssistantMessage(threadId, messageId, {
         signal: abortController.signal,
         onEvent: (event) => {
@@ -508,16 +534,19 @@ export function useChatAgent(initialThreadId?: string) {
 
   async function selectAssistantVersion(messageId: string, versionId: string) {
     const updated = await switchAssistantVersion(threadId, messageId, { version_id: versionId });
+    trackEvent("assistant_version_switched", { thread_id: threadId, message_id: messageId, version_id: versionId });
     setMessages((prev) => prev.map((item) => (item.id === `persisted-${messageId}` ? toChatMessageItem(updated) : item)));
     await refreshSessions();
   }
 
   async function setAssistantFeedback(messageId: string, versionId: string, feedback: AssistantVersionFeedback) {
     const updated = await updateAssistantFeedback(threadId, messageId, versionId, { feedback });
+    trackEvent("assistant_feedback", { thread_id: threadId, message_id: messageId, feedback });
     setMessages((prev) => prev.map((item) => (item.id === `persisted-${messageId}` ? toChatMessageItem(updated) : item)));
   }
 
   const stopGenerating = useCallback(() => {
+    trackEvent("generation_stopped");
     abortControllerRef.current?.abort();
   }, []);
 

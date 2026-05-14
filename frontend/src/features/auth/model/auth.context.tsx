@@ -12,6 +12,7 @@ import {
 } from "@/features/auth/model/auth.storage";
 import type { AuthPurpose, AuthUser, PendingAuthMessagePayload } from "@/features/auth/model/auth.types";
 import { HttpError } from "@/shared/lib/http";
+import { identifyUser, resetAnalytics, trackEvent } from "@/shared/lib/analytics";
 
 interface AuthGateState {
   open: boolean;
@@ -68,6 +69,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearStoredAuthUser();
     clearStoredAccessToken();
     setUser(null);
+    resetAnalytics();
+    trackEvent("user_logout");
     setAuthGate({
       open: false,
       redirectTo: "/chat",
@@ -110,6 +113,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setStoredAccessToken(token);
     setStoredAuthUser(nextUser);
     setUser(nextUser);
+    identifyUser(nextUser.id, { email: nextUser.email });
+    trackEvent("user_login", { method: "email" });
     setReady(true);
     setAuthGate({
       open: false,

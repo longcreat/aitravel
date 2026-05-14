@@ -94,12 +94,12 @@ function MarkdownBubble({
     : content;
 
   return (
-    <div className="max-w-none space-y-4 break-words text-base leading-[1.8] tracking-[0.01em] [line-break:auto] [text-wrap:pretty] [&_*]:break-words">
+    <div className="max-w-none space-y-0 break-words text-base leading-[1.8] tracking-[0.01em] [line-break:auto] [text-wrap:pretty] [&_*]:break-words">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
         components={{
-          p: ({ children }) => <p className="text-base leading-[1.8] [text-wrap:pretty]">{children}</p>,
+          p: ({ children }) => <p className="my-0 text-base leading-[1.8] [text-wrap:pretty]">{children}</p>,
           h1: ({ children }) => <h1 className="text-2xl font-bold leading-tight">{children}</h1>,
           h2: ({ children }) => <h2 className="text-xl font-semibold leading-tight">{children}</h2>,
           h3: ({ children }) => <h3 className="text-lg font-semibold leading-tight">{children}</h3>,
