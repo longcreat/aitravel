@@ -15,6 +15,11 @@ from app.llm.qwen_chat_openai import PatchedQwenChatOpenAI
 
 ChatModelProfileKind = Literal["standard", "thinking"]
 
+# 默认模型配置常量（当环境变量未设置时使用）
+_DEFAULT_MODEL = "gpt-4.1-mini"
+_DEFAULT_PROVIDER = "openai"
+_DEFAULT_TEMPERATURE = "0.2"
+
 
 @dataclass(frozen=True)
 class LLMConnectionSettings:
@@ -90,14 +95,14 @@ def _build_qwen_extra_body(profile: LLMProfile) -> dict[str, Any] | None:
 
 def load_llm_profile_registry() -> LLMProfileRegistry:
     """从环境变量读取当前可用模型档位。"""
-    standard_model = _env("LLM_PROFILE_STANDARD_MODEL", _env("LLM_MODEL", "gpt-4.1-mini"))
-    standard_provider = _env("LLM_PROFILE_STANDARD_PROVIDER", _env("LLM_MODEL_PROVIDER", "openai"))
-    standard_temperature = float(_env("LLM_PROFILE_STANDARD_TEMPERATURE", _env("LLM_TEMPERATURE", "0.2")) or "0.2")
+    standard_model = _env("LLM_PROFILE_STANDARD_MODEL", _env("LLM_MODEL", _DEFAULT_MODEL))
+    standard_provider = _env("LLM_PROFILE_STANDARD_PROVIDER", _env("LLM_MODEL_PROVIDER", _DEFAULT_PROVIDER))
+    standard_temperature = float(_env("LLM_PROFILE_STANDARD_TEMPERATURE", _env("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE)) or _DEFAULT_TEMPERATURE)
 
     thinking_model = _env("LLM_PROFILE_THINKING_MODEL", standard_model)
     thinking_provider = _env("LLM_PROFILE_THINKING_PROVIDER", standard_provider)
     thinking_temperature = float(
-        _env("LLM_PROFILE_THINKING_TEMPERATURE", _env("LLM_TEMPERATURE", "0.2")) or "0.2"
+        _env("LLM_PROFILE_THINKING_TEMPERATURE", _env("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE)) or _DEFAULT_TEMPERATURE
     )
 
     profiles = {
@@ -105,16 +110,16 @@ def load_llm_profile_registry() -> LLMProfileRegistry:
             key="standard",
             label=_env("LLM_PROFILE_STANDARD_LABEL", "普通") or "普通",
             kind="standard",
-            model=standard_model or "gpt-4.1-mini",
-            model_provider=standard_provider or "openai",
+            model=standard_model or _DEFAULT_MODEL,
+            model_provider=standard_provider or _DEFAULT_PROVIDER,
             temperature=standard_temperature,
         ),
         "thinking": LLMProfile(
             key="thinking",
             label=_env("LLM_PROFILE_THINKING_LABEL", "思考") or "思考",
             kind="thinking",
-            model=thinking_model or standard_model or "gpt-4.1-mini",
-            model_provider=thinking_provider or standard_provider or "openai",
+            model=thinking_model or standard_model or _DEFAULT_MODEL,
+            model_provider=thinking_provider or standard_provider or _DEFAULT_PROVIDER,
             temperature=thinking_temperature,
         ),
     }

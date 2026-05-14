@@ -291,9 +291,8 @@ export function useChatAgent(initialThreadId?: string) {
       const assistantItem =
         context.fallbackAssistantMessage?.id === nextAssistantItem.id
           ? {
-              ...context.fallbackAssistantMessage,
-              current_version_id: nextAssistantItem.current_version_id,
-              versions: nextAssistantItem.versions,
+              ...nextAssistantItem,
+              id: context.fallbackAssistantMessage.id,
               status: "streaming" as const,
               can_regenerate: false,
             }
@@ -402,7 +401,7 @@ export function useChatAgent(initialThreadId?: string) {
         {
           thread_id: targetThreadId,
           user_message: normalized,
-          locale: "zh-CN",
+          locale: navigator.language || "zh-CN",
           model_profile_key: effectiveModelProfileKey,
           session_meta: {},
         },
@@ -464,10 +463,11 @@ export function useChatAgent(initialThreadId?: string) {
       await regenerateAssistantMessage(threadId, messageId, {
         signal: abortController.signal,
         onEvent: (event) => {
+          // 收到 turn.start 立即切换为 streaming 状态，给用户即时反馈
           if (
             fallbackAssistantMessage &&
             !regenerateContentStarted &&
-            (event.event === "part.delta" || event.event === "tool.start" || event.event === "tool.done")
+            event.event === "turn.start"
           ) {
             regenerateContentStarted = true;
             setMessages((prev) =>

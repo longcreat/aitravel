@@ -15,6 +15,24 @@ interface HotelCardListProps {
   items: HotelItem[];
 }
 
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  CNY: "¥",
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+  KRW: "₩",
+  HKD: "HK$",
+  TWD: "NT$",
+  THB: "฿",
+  SGD: "S$",
+};
+
+function formatPrice(price: number, unit?: string): string {
+  const symbol = CURRENCY_SYMBOLS[(unit || "CNY").toUpperCase()] ?? `${unit} `;
+  return `${symbol}${price}`;
+}
+
 function StarRating({ star }: { star: number }) {
   return (
     <span className="inline-flex items-center gap-0.5 text-[#e6a23c]">
@@ -82,13 +100,8 @@ function HotelCard({ hotel, onOpenUrl }: { hotel: HotelItem; onOpenUrl: (url: st
           </p>
         ) : null}
 
-        {/* 评分 + 标签 */}
+        {/* 标签 */}
         <div className="flex flex-wrap items-center gap-1.5">
-          {hotel.rating ? (
-            <span className="rounded-md bg-[#fff7ed] px-1.5 py-0.5 text-[11px] font-bold text-[#e6a23c]">
-              {hotel.rating.toFixed(1)}
-            </span>
-          ) : null}
           {hotel.tags?.slice(0, 3).map((tag) => (
             <span
               key={tag}
@@ -112,7 +125,7 @@ function HotelCard({ hotel, onOpenUrl }: { hotel: HotelItem; onOpenUrl: (url: st
         {hotel.price ? (
           <div className="mt-auto flex items-end justify-between pt-1">
             <div>
-              <span className="text-[16px] font-bold text-[#e85d3a]">¥{hotel.price}</span>
+              <span className="text-[16px] font-bold text-[#e85d3a]">{formatPrice(hotel.price, hotel.priceUnit)}</span>
               <span className="ml-0.5 text-[11px] text-[#8a857b]">/晚起</span>
             </div>
             {hotel.bookingUrl ? (

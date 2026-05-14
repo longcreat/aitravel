@@ -2,6 +2,9 @@
 
 该模块保留 LangChain / ChatOpenAI 的整体调用方式，只补齐百炼 OpenAI-compatible
 接口在 Chat Completions 流式返回中的 `reasoning_content` 字段。
+
+TODO: 当 langchain-openai 官方支持 reasoning_content 字段后移除此适配层。
+      跟踪: https://github.com/langchain-ai/langchain/issues
 """
 
 from __future__ import annotations
