@@ -67,3 +67,9 @@ frontend/vite.config.d.ts
 *.sql
 !backend/migrations/*.sql
 *.egg-info/
+
+# Amplitude local config
+.amplitude/
+
+# Deploy scripts (local only)
+deploy/
