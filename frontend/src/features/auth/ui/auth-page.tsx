@@ -26,6 +26,17 @@ export function AuthPage() {
   const [sending, setSending] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (resendCooldown <= 0) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setResendCooldown((value) => (value <= 1 ? 0 : value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendCooldown]);
 
   useEffect(() => {
     if (ready && isAuthenticated) {
@@ -38,6 +49,7 @@ export function AuthPage() {
     setStep("email");
     setCode("");
     setError(null);
+    setResendCooldown(0);
   }, [initialMode]);
 
   async function requestCode() {
@@ -47,11 +59,16 @@ export function AuthPage() {
       return false;
     }
 
+    if (resendCooldown > 0) {
+      return false;
+    }
+
     setSending(true);
     setError(null);
     try {
       await sendAuthCode({ email: normalizedEmail, purpose: mode });
       setStep("code");
+      setResendCooldown(60);
       return true;
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "验证码发送失败");
@@ -134,9 +151,9 @@ export function AuthPage() {
                   label="电子邮件"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  className="h-16 rounded-[22px] border-border bg-white px-6 text-[16px] shadow-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+                  className="h-16 rounded-[22px] border-border bg-transparent px-6 text-[16px] shadow-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                   labelPositionerClassName="left-5"
-                  labelClassName="bg-white"
+                  labelClassName="bg-paper"
                 />
 
                 {error ? <p className="px-1 text-sm text-[#b8503b]">{error}</p> : null}
@@ -157,9 +174,9 @@ export function AuthPage() {
                   value={code}
                   label="验证码"
                   onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                  className="h-16 rounded-[22px] border-border bg-white px-6 text-[18px] tracking-[0.08em] text-ink shadow-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+                  className="h-16 rounded-[22px] border-border bg-transparent px-6 text-[18px] tracking-[0.08em] text-ink shadow-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                   labelPositionerClassName="left-5"
-                  labelClassName="bg-white"
+                  labelClassName="bg-paper"
                 />
 
                 {error ? <p className="px-1 text-sm text-[#b8503b]">{error}</p> : null}
@@ -184,11 +201,15 @@ export function AuthPage() {
                   type="button"
                   variant="outline"
                   size="hero"
-                  className="border-border bg-white text-[18px] font-medium text-muted-foreground hover:bg-secondary/30"
-                  disabled={sending}
+                  className="border-border bg-transparent text-[18px] font-medium text-muted-foreground hover:bg-secondary/30 disabled:opacity-60"
+                  disabled={sending || resendCooldown > 0}
                   onClick={() => void requestCode()}
                 >
-                  {sending ? "发送中..." : "重新发送电子邮件"}
+                  {sending
+                    ? "发送中..."
+                    : resendCooldown > 0
+                      ? `重新发送（${resendCooldown}s）`
+                      : "重新发送电子邮件"}
                 </Button>
               </>
             )}
