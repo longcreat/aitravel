@@ -10,4 +10,4 @@ services:
       - "127.0.0.1:18000:8000"
     volumes:
       - ./backend/data:/app/data
-      - ./backend/config/mcp.servers.json:/app/config/mcp.servers.json:ro
+      - ./backend/config:/app/config:ro
