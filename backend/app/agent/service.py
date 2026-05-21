@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,8 @@ from app.agent.context import AgentRequestContext
 from app.agent.presentation import _content_to_text, build_final_response
 from app.agent.runtime import AgentRuntimeService
 from app.agent.streaming import AgentStreamService, StreamRunState, resolve_annotations_from_text
+from app.connectors.runtime import user_connector_tools
+from app.connectors.service import ConnectorService
 from app.llm.provider import (
     coerce_llm_profile_key,
     get_default_llm_profile_key,
@@ -80,7 +83,12 @@ def _finalize_ui_parts(
 class TravelAgentService:
     """旅行 Agent 业务门面。"""
 
-    def __init__(self, mcp_config_path: Path, sqlite_db_path: Path) -> None:
+    def __init__(
+        self,
+        mcp_config_path: Path,
+        sqlite_db_path: Path,
+        connector_service: ConnectorService | None = None,
+    ) -> None:
         self._chat_store = ChatSQLiteStore(sqlite_db_path)
         self._runtime_service = AgentRuntimeService(mcp_config_path=mcp_config_path, sqlite_db_path=sqlite_db_path)
         self._checkpoint_service = AgentCheckpointService(
@@ -89,6 +97,7 @@ class TravelAgentService:
         )
         self._stream_service = AgentStreamService(runtime_service=self._runtime_service)
         self._speech_service = SpeechService(chat_store=self._chat_store, sqlite_db_path=sqlite_db_path)
+        self._connector_service = connector_service
 
     async def startup(self) -> None:
         """初始化 Agent 运行时。"""
@@ -283,22 +292,25 @@ class TravelAgentService:
             extra_metadata={"assistant_message_id": assistant_message_id},
         ):
             try:
-                async for event_name, event_payload in self._stream_service.stream_agent_run(
-                    thread_id=thread_id,
-                    agent_input={"messages": [HumanMessage(content=target.user_message_text)]},
-                    checkpoint_id=target.original_parent_checkpoint_id,
-                    model_profile_key=model_profile_key,
-                    state=state,
-                    agent_context=AgentRequestContext(
-                        user_id=user_id,
+                async with self._user_tools_context(user_id) as user_tools_bundle:
+                    user_agent = self._runtime_service.build_user_agent(user_tools_bundle.tools)
+                    async for event_name, event_payload in self._stream_service.stream_agent_run(
                         thread_id=thread_id,
+                        agent_input={"messages": [HumanMessage(content=target.user_message_text)]},
+                        checkpoint_id=target.original_parent_checkpoint_id,
                         model_profile_key=model_profile_key,
-                    ),
-                    assistant_message_id=assistant_message_id,
-                    version_id=version_id,
-                    on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
-                ):
-                    yield event_name, event_payload
+                        state=state,
+                        agent_context=AgentRequestContext(
+                            user_id=user_id,
+                            thread_id=thread_id,
+                            model_profile_key=model_profile_key,
+                        ),
+                        assistant_message_id=assistant_message_id,
+                        version_id=version_id,
+                        on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
+                        agent=user_agent,
+                    ):
+                        yield event_name, event_payload
             except BaseException as exc:
                 if not isinstance(exc, asyncio.CancelledError):
                     self._log_pipeline_failure(
@@ -394,24 +406,27 @@ class TravelAgentService:
             extra_metadata={"session_meta_keys": sorted(request.session_meta.keys())},
         ):
             try:
-                async for event_name, event_payload in self._stream_service.stream_agent_run(
-                    thread_id=request.thread_id,
-                    agent_input={"messages": [HumanMessage(content=request.user_message)]},
-                    checkpoint_id=checkpoint_id,
-                    model_profile_key=model_profile_key,
-                    state=state,
-                    agent_context=AgentRequestContext(
-                        user_id=user_id,
+                async with self._user_tools_context(user_id) as user_tools_bundle:
+                    user_agent = self._runtime_service.build_user_agent(user_tools_bundle.tools)
+                    async for event_name, event_payload in self._stream_service.stream_agent_run(
                         thread_id=request.thread_id,
-                        locale=request.locale,
+                        agent_input={"messages": [HumanMessage(content=request.user_message)]},
+                        checkpoint_id=checkpoint_id,
                         model_profile_key=model_profile_key,
-                        session_meta=request.session_meta,
-                    ),
-                    assistant_message_id=assistant_placeholder.id,
-                    version_id=version_id,
-                    on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
-                ):
-                    yield event_name, event_payload
+                        state=state,
+                        agent_context=AgentRequestContext(
+                            user_id=user_id,
+                            thread_id=request.thread_id,
+                            locale=request.locale,
+                            model_profile_key=model_profile_key,
+                            session_meta=request.session_meta,
+                        ),
+                        assistant_message_id=assistant_placeholder.id,
+                        version_id=version_id,
+                        on_assistant_text_chunk=lambda chunk: self._speech_service.append_text(speech_job_id, chunk),
+                        agent=user_agent,
+                    ):
+                        yield event_name, event_payload
             except BaseException as exc:
                 is_cancelled = isinstance(exc, asyncio.CancelledError)
                 if not is_cancelled:
@@ -480,3 +495,20 @@ class TravelAgentService:
     async def rollback_thread(self, user_id: str, thread_id: str) -> None:
         """将线程回滚到最近一个合法的 checkpoint。"""
         await self._checkpoint_service.rollback_thread(user_id, thread_id)
+
+    @asynccontextmanager
+    async def _user_tools_context(self, user_id: str):
+        """按需获取用户级 MCP 工具的上下文管理器。"""
+        if self._connector_service is None:
+            yield _EmptyUserTools()
+            return
+        async with user_connector_tools(self._connector_service, user_id) as bundle:
+            yield bundle
+
+
+class _EmptyUserTools:
+    """当未配置 ConnectorService 时使用的工具占位。"""
+
+    tools: list[Any] = []
+    connected_servers: list[str] = []
+    errors: list[str] = []

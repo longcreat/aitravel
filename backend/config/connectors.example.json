@@ -1,0 +1,24 @@
+{
+  "notion": {
+    "display_name": "Notion",
+    "description": "连接你的 Notion 工作区，让助手在你的页面、数据库里检索和创建内容。",
+    "icon_url": "https://www.notion.so/images/favicon.ico",
+    "mcp_server_url": "https://mcp.notion.com/mcp",
+    "default_scopes": null,
+    "client_name": "AI Travel Agent",
+    "client_uri": "https://aitravel.aigoway.tech",
+    "logo_uri": "https://aitravel.aigoway.tech/icon-512.png",
+    "enabled": true
+  },
+  "linear": {
+    "display_name": "Linear",
+    "description": "连接你的 Linear 工作区，让助手帮你查看 issue、追踪进度。",
+    "icon_url": "https://linear.app/favicon.ico",
+    "mcp_server_url": "https://mcp.linear.app/sse",
+    "default_scopes": null,
+    "client_name": "AI Travel Agent",
+    "client_uri": "https://aitravel.aigoway.tech",
+    "logo_uri": "https://aitravel.aigoway.tech/icon-512.png",
+    "enabled": true
+  }
+}

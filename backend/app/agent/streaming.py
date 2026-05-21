@@ -58,9 +58,11 @@ class AgentStreamService:
         assistant_message_id: str = "assistant-message",
         version_id: str = "assistant-version",
         on_assistant_text_chunk: Callable[[str], None] | None = None,
+        agent: Any | None = None,
     ):
         """执行一次底层 Agent 流并累积结果。"""
         runtime = self._runtime_service.require_runtime()
+        executor = agent if agent is not None else runtime.agent
 
         configurable: dict[str, Any] = {
             "thread_id": thread_id,
@@ -69,7 +71,7 @@ class AgentStreamService:
         if checkpoint_id:
             configurable["checkpoint_id"] = checkpoint_id
 
-        async for part in runtime.agent.astream(
+        async for part in executor.astream(
             agent_input,
             config={"configurable": configurable},
             context=agent_context,

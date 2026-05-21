@@ -25,12 +25,25 @@ def build_memory_runtime(sqlite_db_path: Path):
 
 @dataclass
 class AgentRuntime:
-    """Agent 运行时容器。"""
+    """Agent 运行时容器。
+
+    Attributes:
+        agent: 默认 agent（仅含全局工具），无用户级 connector 时使用。
+        mcp_bundle: 全局共享的 MCP 工具集。
+        local_tools: 本地工具列表，用于按用户重新拼接 agent。
+        local_tool_names: 本地工具名，用于运行时快照展示。
+        checkpointer: SQLite checkpointer，按用户拼装 agent 时复用。
+        store: LangGraph store（当前未启用）。
+        model: 共享 chat model 实例。
+    """
 
     agent: Any
     mcp_bundle: MCPToolBundle
+    local_tools: list[Any]
     local_tool_names: list[str]
     checkpointer: Any
+    store: Any
+    model: Any
 
 
 class AgentRuntimeService:
@@ -75,8 +88,25 @@ class AgentRuntimeService:
         self._runtime = AgentRuntime(
             agent=agent,
             mcp_bundle=mcp_bundle,
+            local_tools=local_tools,
             local_tool_names=[tool.name for tool in local_tools],
             checkpointer=checkpointer,
+            store=store,
+            model=model,
+        )
+
+    def build_user_agent(self, extra_tools: list[Any]) -> Any:
+        """基于全局组件按需构建一个挂载了用户级 MCP 工具的 agent。"""
+        runtime = self.require_runtime()
+        if not extra_tools:
+            return runtime.agent
+        return create_agent(
+            model=runtime.model,
+            tools=[*runtime.local_tools, *runtime.mcp_bundle.tools, *extra_tools],
+            context_schema=AgentRequestContext,
+            middleware=build_agent_middleware(),
+            checkpointer=runtime.checkpointer,
+            store=runtime.store,
         )
 
     async def shutdown(self) -> None:

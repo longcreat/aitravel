@@ -1,4 +1,4 @@
-import { Bell, ChevronRight, Settings, Shield, SlidersHorizontal, User } from "lucide-react";
+import { Bell, ChevronRight, Plug, Settings, Shield, SlidersHorizontal, User } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/features/auth/model/auth.context";
@@ -87,6 +87,19 @@ export function ProfilePage() {
               title="权限管理"
               trailing={<ChevronRight className="h-4 w-4 text-[#809b9f]" />}
               onClick={() => navigate("/profile/permissions")}
+            />
+
+            <SettingsRowButton
+              aria-label="open-connectors"
+              bordered
+              icon={
+                <div className="rounded-full bg-indigo-50 p-2 text-indigo-500">
+                  <Plug className="h-4 w-4" />
+                </div>
+              }
+              title="应用授权"
+              trailing={<ChevronRight className="h-4 w-4 text-[#809b9f]" />}
+              onClick={() => navigate("/profile/connectors")}
             />
 
             <SettingsRow
