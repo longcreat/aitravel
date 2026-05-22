@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from langchain_qwq import ChatQwen
+
 from app.llm.provider import (
     build_chat_model_for_profile,
     build_chat_models_by_profile,
@@ -40,13 +42,7 @@ def test_build_chat_model_for_profile_uses_init_chat_model_for_openai(monkeypatc
     }
 
 
-def test_build_chat_model_for_profile_uses_qwen_adapter_with_thinking(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class _FakePatchedQwenChatOpenAI:
-        def __init__(self, **kwargs):
-            captured["kwargs"] = kwargs
-
+def test_build_chat_model_for_profile_uses_chat_qwen_with_thinking(monkeypatch):
     monkeypatch.setenv("LLM_PROFILE_DEFAULT", "standard")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "qwen-plus")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "qwen")
@@ -56,19 +52,36 @@ def test_build_chat_model_for_profile_uses_qwen_adapter_with_thinking(monkeypatc
     monkeypatch.setenv("LLM_PROFILE_THINKING_TEMPERATURE", "0.4")
     monkeypatch.setenv("OPENAI_API_KEY", "demo-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    monkeypatch.setattr("app.llm.provider.PatchedQwenChatOpenAI", _FakePatchedQwenChatOpenAI)
 
-    result = build_chat_model_for_profile("thinking")
+    standard = build_chat_model_for_profile("standard")
+    thinking = build_chat_model_for_profile("thinking")
 
-    assert isinstance(result, _FakePatchedQwenChatOpenAI)
-    assert captured["kwargs"] == {
-        "model": "qwen3-8b",
-        "model_provider": "qwen",
-        "temperature": 0.4,
-        "api_key": "demo-key",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "extra_body": {"enable_thinking": True},
-    }
+    assert isinstance(standard, ChatQwen)
+    assert isinstance(thinking, ChatQwen)
+    # Qwen3 / qwen-plus 等混合思考模型必须显式区分 enable_thinking
+    assert standard.enable_thinking is False
+    assert thinking.enable_thinking is True
+    assert thinking.model_name == "qwen3-8b"
+    assert thinking.api_base == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert thinking.temperature == 0.4
+
+
+def test_build_chat_model_for_profile_skips_enable_thinking_for_qwq(monkeypatch):
+    monkeypatch.setenv("LLM_PROFILE_DEFAULT", "standard")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "qwq-32b")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "qwen")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_MODEL", "qwq-32b")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_PROVIDER", "qwen")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_TEMPERATURE", "0.2")
+    monkeypatch.setenv("OPENAI_API_KEY", "demo-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+    model = build_chat_model_for_profile("thinking")
+
+    assert isinstance(model, ChatQwen)
+    # QwQ 是纯思考模型，不应该传 enable_thinking 字段（保持 SDK 默认）
+    assert model.enable_thinking is None
 
 
 def test_build_chat_models_by_profile_returns_one_per_profile(monkeypatch):

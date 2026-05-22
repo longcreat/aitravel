@@ -8,20 +8,25 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
-
-from app.llm.qwen_chat_openai import PatchedQwenChatOpenAI
+from langchain_qwq import ChatQwen
 
 
 ChatModelProfileKind = Literal["standard", "thinking"]
 
-# 默认模型配置常量（当环境变量未设置时使用）
-_DEFAULT_MODEL = "gpt-4.1-mini"
-_DEFAULT_PROVIDER = "openai"
+# 温度档位的兜底值；模型名 / provider 没有任何兜底，必须从环境变量明确给出。
 _DEFAULT_TEMPERATURE = "0.2"
+
+
+class LLMConfigError(ValueError):
+    """LLM 配置缺失或非法时抛出。
+
+    继承自 ``ValueError``，以兼容 ``api/sessions.py`` / ``api/chat.py`` 已有的
+    ``except ValueError`` 处理（无效 profile_key 仍然返回 400）。
+    """
 
 
 @dataclass(frozen=True)
@@ -94,22 +99,24 @@ def _uses_qwen_chat_adapter(profile: LLMProfile, connection: LLMConnectionSettin
     )
 
 
-def _build_qwen_extra_body(profile: LLMProfile) -> dict[str, Any] | None:
-    """生成传给百炼 OpenAI 兼容接口的 extra_body。
-
-    - QwQ 系列模型：仅思考模式，不需要 enable_thinking
-    - 其他混合思考模型：根据档位 kind 决定 enable_thinking 真假
-    """
-    normalized_model = profile.model.strip().lower()
-    if normalized_model.startswith("qwq") or "thinking" in normalized_model:
-        return None
-    return {"enable_thinking": profile.kind == "thinking"}
-
-
 def load_llm_profile_registry() -> LLMProfileRegistry:
-    """从环境变量读取当前可用模型档位。"""
-    standard_model = _env("LLM_PROFILE_STANDARD_MODEL", _env("LLM_MODEL", _DEFAULT_MODEL))
-    standard_provider = _env("LLM_PROFILE_STANDARD_PROVIDER", _env("LLM_MODEL_PROVIDER", _DEFAULT_PROVIDER))
+    """从环境变量读取当前可用模型档位。
+
+    模型名与 provider 必须显式给出（``LLM_PROFILE_STANDARD_MODEL`` /
+    ``LLM_PROFILE_STANDARD_PROVIDER``，可由 ``LLM_MODEL`` / ``LLM_MODEL_PROVIDER``
+    托底）。如果两套都没配置就直接抛错，防止生产环境用错误的兜底模型悄无声息
+    地连到一个不存在的 provider。
+    """
+    standard_model = _env("LLM_PROFILE_STANDARD_MODEL", _env("LLM_MODEL"))
+    if not standard_model:
+        raise LLMConfigError(
+            "LLM_PROFILE_STANDARD_MODEL (or LLM_MODEL) is required but not set"
+        )
+    standard_provider = _env("LLM_PROFILE_STANDARD_PROVIDER", _env("LLM_MODEL_PROVIDER"))
+    if not standard_provider:
+        raise LLMConfigError(
+            "LLM_PROFILE_STANDARD_PROVIDER (or LLM_MODEL_PROVIDER) is required but not set"
+        )
     standard_temperature = float(
         _env("LLM_PROFILE_STANDARD_TEMPERATURE", _env("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE))
         or _DEFAULT_TEMPERATURE
@@ -127,23 +134,23 @@ def load_llm_profile_registry() -> LLMProfileRegistry:
             key="standard",
             label=_env("LLM_PROFILE_STANDARD_LABEL", "普通") or "普通",
             kind="standard",
-            model=standard_model or _DEFAULT_MODEL,
-            model_provider=standard_provider or _DEFAULT_PROVIDER,
+            model=standard_model,
+            model_provider=standard_provider,
             temperature=standard_temperature,
         ),
         "thinking": LLMProfile(
             key="thinking",
             label=_env("LLM_PROFILE_THINKING_LABEL", "思考") or "思考",
             kind="thinking",
-            model=thinking_model or standard_model or _DEFAULT_MODEL,
-            model_provider=thinking_provider or standard_provider or _DEFAULT_PROVIDER,
+            model=thinking_model or standard_model,
+            model_provider=thinking_provider or standard_provider,
             temperature=thinking_temperature,
         ),
     }
 
     default_profile_key = _env("LLM_PROFILE_DEFAULT", "standard") or "standard"
     if default_profile_key not in profiles:
-        raise ValueError(f"Invalid default LLM profile key: {default_profile_key}")
+        raise LLMConfigError(f"Invalid default LLM profile key: {default_profile_key}")
 
     return LLMProfileRegistry(default_profile_key=default_profile_key, profiles=profiles)
 
@@ -168,7 +175,7 @@ def resolve_llm_profile_key(requested_key: str | None) -> str:
 
     normalized = requested_key.strip()
     if normalized not in registry.profiles:
-        raise ValueError("Invalid model profile key")
+        raise LLMConfigError("Invalid model profile key")
     return normalized
 
 
@@ -187,24 +194,39 @@ def get_llm_profile(profile_key: str | None) -> LLMProfile:
     return registry.profiles[resolved_key]
 
 
+def _profile_enable_thinking(profile: LLMProfile) -> bool | None:
+    """决定 ChatQwen.enable_thinking 该传什么。
+
+    - QwQ / 名字带 "thinking" 的纯思考模型：返回 None，让 SDK 走默认（不传字段）
+    - 其它 Qwen 系列（Qwen3 / Qwen-Plus / Qwen-Max 等混合思考模型）：根据档位
+      kind 显式传 True/False
+    """
+    normalized = profile.model.strip().lower()
+    if normalized.startswith("qwq") or "thinking" in normalized:
+        return None
+    return profile.kind == "thinking"
+
+
 def build_chat_model_for_profile(profile_key: str) -> BaseChatModel:
     """为指定档位实例化一个 ChatModel。
 
-    各档位独立实例化，所有运行时差异（model 名、temperature、extra_body 里的
-    enable_thinking）都在实例化时固化。运行时通过 middleware 用 `request.override(
-    model=...)` 来切换。
+    各档位独立实例化，所有运行时差异（model 名、temperature、enable_thinking）
+    都在实例化时固化。运行时由 `ModelSelectionMiddleware` 通过
+    `request.override(model=...)` 在不同档位间切换。
     """
     profile = get_llm_profile(profile_key)
     connection = load_llm_connection_settings()
     if _uses_qwen_chat_adapter(profile, connection):
-        return PatchedQwenChatOpenAI(
-            model=profile.model,
-            model_provider="qwen",
-            temperature=profile.temperature,
-            api_key=connection.api_key,
-            base_url=connection.base_url,
-            extra_body=_build_qwen_extra_body(profile),
-        )
+        kwargs: dict[str, object] = {
+            "model": profile.model,
+            "temperature": profile.temperature,
+            "api_key": connection.api_key,
+            "api_base": connection.base_url,
+        }
+        enable_thinking = _profile_enable_thinking(profile)
+        if enable_thinking is not None:
+            kwargs["enable_thinking"] = enable_thinking
+        return ChatQwen(**kwargs)
     return init_chat_model(
         profile.model,
         model_provider=profile.model_provider,

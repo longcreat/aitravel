@@ -441,6 +441,10 @@ async def test_travel_agent_service_startup_uses_context_schema_and_middleware(
     monkeypatch.setattr("app.agent.runtime.build_memory_runtime", _fake_build_memory_runtime)
     monkeypatch.setattr("app.agent.runtime.create_agent", _fake_create_agent)
 
+    # provider 现在禁止默认模型兜底，测试必须显式提供模型环境变量
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "fake-model")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
+
     cfg = tmp_path / "mcp.servers.json"
     cfg.write_text("{}", encoding="utf-8")
 
