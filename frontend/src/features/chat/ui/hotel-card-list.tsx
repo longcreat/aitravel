@@ -121,20 +121,26 @@ function HotelCard({ hotel, onOpenUrl }: { hotel: HotelItem; onOpenUrl: (url: st
           </p>
         ) : null}
 
-        {/* 价格 + 预订链接 */}
-        {hotel.price ? (
-          <div className="mt-auto flex items-end justify-between pt-1">
-            <div>
-              <span className="text-[16px] font-bold text-[#e85d3a]">{formatPrice(hotel.price, hotel.priceUnit)}</span>
-              <span className="ml-0.5 text-[11px] text-[#8a857b]">/晚起</span>
+        {/* 价格 + 预订链接：即使售罄/无价，只要有 bookingUrl 仍提供入口 */}
+        {(hotel.price || hotel.priceUnavailable || hotel.bookingUrl) ? (
+          <div className="mt-auto flex items-end justify-between gap-2 pt-1">
+            <div className="min-w-0">
+              {hotel.price ? (
+                <>
+                  <span className="text-[16px] font-bold text-[#e85d3a]">{formatPrice(hotel.price, hotel.priceUnit)}</span>
+                  <span className="ml-0.5 text-[11px] text-[#8a857b]">/晚起</span>
+                </>
+              ) : hotel.priceUnavailable ? (
+                <span className="text-[12px] text-[#a09a8f]">{hotel.priceUnavailable}</span>
+              ) : null}
             </div>
             {hotel.bookingUrl ? (
               <button
                 type="button"
                 onClick={() => onOpenUrl(hotel.bookingUrl!)}
-                className="rounded-md bg-[#e85d3a] px-2 py-0.5 text-[11px] text-white hover:bg-[#d04e2e]"
+                className="shrink-0 rounded-md bg-[#e85d3a] px-2 py-0.5 text-[11px] text-white hover:bg-[#d04e2e]"
               >
-                预订
+                {hotel.price ? "预订" : "查看"}
               </button>
             ) : null}
           </div>

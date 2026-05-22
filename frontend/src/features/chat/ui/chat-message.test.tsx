@@ -319,7 +319,7 @@ describe("ChatMessage", () => {
     expect(screen.getByText(/"query": "京都攻略"/)).toBeInTheDocument();
   });
 
-  it("renders reasoning panel above the assistant answer", () => {
+  it("renders reasoning toggle and reveals content after click", async () => {
     const message: ChatMessageItem = {
       id: "assistant-reasoning",
       role: "assistant",
@@ -329,10 +329,29 @@ describe("ChatMessage", () => {
 
     renderWithOverlayRoot(<ChatMessage message={message} />);
 
+    // 默认折叠：能看到入口标签和最终答复，但思考内容不可见
     expect(screen.getByText("思考过程")).toBeInTheDocument();
-    expect(screen.getByText("已完成")).toBeInTheDocument();
-    expect(screen.getByText("先拆解问题，再整理答复。")).toBeInTheDocument();
     expect(screen.getByText("这是最终答复。")).toBeInTheDocument();
+    expect(screen.queryByText("先拆解问题，再整理答复。")).not.toBeInTheDocument();
+
+    // 点击入口后展开
+    await userEvent.click(screen.getByRole("button", { name: "toggle-reasoning-reasoning-1" }));
+    expect(screen.getByText("先拆解问题，再整理答复。")).toBeInTheDocument();
+  });
+
+  it("shows '思考中' label while reasoning is streaming", () => {
+    const message: ChatMessageItem = {
+      id: "assistant-reasoning-streaming",
+      role: "assistant",
+      text: "",
+      parts: [reasoningPart("reasoning-1", "正在思考...", "streaming")],
+    };
+
+    renderWithOverlayRoot(<ChatMessage message={message} />);
+
+    expect(screen.getByText("思考中")).toBeInTheDocument();
+    // 流式态下也保持折叠
+    expect(screen.queryByText("正在思考...")).not.toBeInTheDocument();
   });
 
   it("shows stop icon when current speech is playing", () => {

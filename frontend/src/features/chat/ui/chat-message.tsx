@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   AlertTriangle,
+  Brain,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -207,20 +208,45 @@ function MarkdownBubble({
   );
 }
 
-function ReasoningPanel({
+function ReasoningChip({
   content,
   state,
+  partId,
 }: {
   content: string;
   state: "streaming" | "completed" | null;
+  partId: string;
 }) {
+  const isStreaming = state === "streaming";
+  const [expanded, setExpanded] = useState(false);
+
   return (
-    <div className="mb-4 rounded-[12px] border border-[#efe4d3] bg-[#fbf6eb] px-3 py-3">
-      <div className="mb-2 flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.12em] text-[#b07a4d]">
-        <span>思考过程</span>
-        <span>{state === "streaming" ? "思考中" : "已完成"}</span>
-      </div>
-      <div className="whitespace-pre-wrap break-words text-[14px] leading-6 text-[#6f6557]">{content}</div>
+    <div>
+      <button
+        type="button"
+        aria-label={`toggle-reasoning-${partId}`}
+        aria-expanded={expanded}
+        className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[14px] font-medium text-[#7a766d] transition-colors hover:bg-[#f0ece4]"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {isStreaming ? (
+          <LoaderCircle className="h-4 w-4 animate-spin" />
+        ) : (
+          <Brain className="h-4 w-4 text-[#6d8a6f]" />
+        )}
+        <span>{isStreaming ? "思考中" : "思考过程"}</span>
+        <ChevronRight
+          className={cn(
+            "h-4 w-4 opacity-50 transition-transform duration-200 ease-out",
+            expanded ? "rotate-90" : "",
+          )}
+        />
+      </button>
+      {expanded ? (
+        <div className="mt-1.5 border-l-2 border-[#e5eded] pl-3 text-[13px] leading-6 text-[#7a766d] whitespace-pre-wrap break-words">
+          {content}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -235,11 +261,6 @@ export function ChatMessage({
 }: ChatMessageProps) {
   const isUser = message.role === "user";
   const messageParts = !isUser ? message.parts ?? [] : [];
-  const reasoningParts = !isUser
-    ? messageParts.filter((part): part is Extract<(typeof messageParts)[number], { type: "reasoning" }> => part.type === "reasoning")
-    : [];
-  const reasoningText = reasoningParts.map((part) => part.text).join("").trim();
-  const reasoningState = reasoningParts.some((part) => part.status === "streaming") ? "streaming" : reasoningParts.length ? "completed" : null;
   const shouldShowTypingOnly = !isUser && !message.text && messageParts.length === 0;
   const [copied, setCopied] = useState(false);
   const [activeToolGroupIndex, setActiveToolGroupIndex] = useState<number | null>(null);
@@ -354,7 +375,21 @@ export function ChatMessage({
       <div className="space-y-1">
         {partGroups.map((group, groupIdx) => {
           if (group.kind === "reasoning") {
-            return null;
+            const reasoningPart = group.parts[0] as Extract<(typeof messageParts)[number], { type: "reasoning" }>;
+            const partState =
+              reasoningPart.status === "streaming"
+                ? "streaming"
+                : reasoningPart.text
+                  ? "completed"
+                  : null;
+            return (
+              <ReasoningChip
+                key={reasoningPart.id}
+                partId={reasoningPart.id}
+                content={reasoningPart.text}
+                state={partState}
+              />
+            );
           }
           if (group.kind === "text") {
             const textPart = group.parts[0] as Extract<(typeof messageParts)[number], { type: "text" }>;
@@ -424,7 +459,6 @@ export function ChatMessage({
                 : "w-full border-[#2c2b28]/[0.06] bg-white px-4 py-4 text-[#2c2b28] shadow-sm",
             )}
           >
-            {!isUser && reasoningText ? <ReasoningPanel content={reasoningText} state={reasoningState} /> : null}
             {isUser ? <MarkdownBubble content={message.text} isUser={true} /> : renderAssistantBody()}
           </div>
         )}

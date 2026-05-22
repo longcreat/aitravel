@@ -21,6 +21,8 @@ export interface HotelItem {
   address?: string;
   price?: number;
   priceUnit?: string;
+  /** 售罄等"无价但已知不可订"的提示信息（来自 RollingGo 的 price.message）。 */
+  priceUnavailable?: string;
   rating?: number;
   star?: number;
   imageUrl?: string;
@@ -90,20 +92,27 @@ function isHotelLike(obj: unknown): obj is Record<string, unknown> {
 }
 
 /**
- * 从 raw 对象中提取价格数值。
- * 支持: 直接数字字段 或 rollinggo 格式 { lowestPrice: number, currency: string }
+ * 从 raw 对象中提取价格数值与"售罄"等无价提示。
+ * 支持: 直接数字字段；rollinggo 格式 { lowestPrice: number, currency: string, hasPrice: boolean, message }
  */
-function extractPrice(raw: Record<string, unknown>): { price?: number; unit?: string } {
+function extractPrice(raw: Record<string, unknown>): { price?: number; unit?: string; unavailable?: string } {
   // 直接数字字段
   for (const key of ["price", "pricePerNight", "price_per_night", "lowestPrice", "lowest_price"]) {
     if (typeof raw[key] === "number" && raw[key] !== 0) return { price: raw[key] as number };
   }
-  // 嵌套对象: price: { lowestPrice, currency }
+  // 嵌套对象: price: { hasPrice, lowestPrice, currency, message }
   if (typeof raw.price === "object" && raw.price !== null) {
     const priceObj = raw.price as Record<string, unknown>;
     const val = Number(priceObj.lowestPrice ?? priceObj.lowest_price ?? 0);
     const unit = typeof priceObj.currency === "string" ? priceObj.currency : undefined;
     if (val > 0) return { price: val, unit };
+    // hasPrice === false：保留售罄等提示，便于卡片继续展示状态与 bookingUrl
+    if (priceObj.hasPrice === false) {
+      const unavailable = typeof priceObj.message === "string" && priceObj.message.trim()
+        ? (priceObj.message as string).trim()
+        : "暂未开放";
+      return { unavailable };
+    }
   }
   return {};
 }
@@ -113,7 +122,7 @@ function extractPrice(raw: Record<string, unknown>): { price?: number; unit?: st
  * 支持 rollinggo MCP 真实格式 + 多种通用字段名。
  */
 function normalizeHotelItem(raw: Record<string, unknown>): HotelItem {
-  const { price, unit } = extractPrice(raw);
+  const { price, unit, unavailable } = extractPrice(raw);
   return {
     id: String(raw.id ?? raw.hotelId ?? raw.hotel_id ?? ""),
     name: String(raw.name ?? raw.hotelName ?? raw.hotel_name ?? ""),
@@ -121,6 +130,7 @@ function normalizeHotelItem(raw: Record<string, unknown>): HotelItem {
     address: String(raw.address ?? raw.location ?? ""),
     price,
     priceUnit: unit ?? (typeof raw.priceUnit === "string" ? raw.priceUnit : typeof raw.price_unit === "string" ? raw.price_unit : typeof raw.currency === "string" ? raw.currency : "CNY"),
+    priceUnavailable: unavailable,
     rating: Number(raw.rating ?? raw.score ?? 0) || undefined,
     star: Number(raw.star ?? raw.starLevel ?? raw.star_level ?? raw.starRating ?? raw.star_rating ?? 0) || undefined,
     imageUrl: String(raw.imageUrl ?? raw.image_url ?? raw.image ?? raw.coverImage ?? raw.cover_image ?? raw.img ?? ""),
