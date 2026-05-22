@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from app.llm.provider import (
-    build_chat_model,
+    build_chat_model_for_profile,
+    build_chat_models_by_profile,
     coerce_llm_profile_key,
-    get_llm_configurable,
     list_llm_profiles,
     load_llm_profile_registry,
     resolve_llm_profile_key,
 )
 
 
-def test_build_chat_model_uses_init_chat_model_with_runtime_configurable_fields(monkeypatch):
+def test_build_chat_model_for_profile_uses_init_chat_model_for_openai(monkeypatch):
     captured: dict[str, object] = {}
 
     def _fake_init_chat_model(model, *, model_provider=None, **kwargs):
@@ -27,18 +27,74 @@ def test_build_chat_model_uses_init_chat_model_with_runtime_configurable_fields(
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr("app.llm.provider.init_chat_model", _fake_init_chat_model)
 
-    result = build_chat_model()
+    result = build_chat_model_for_profile("standard")
 
     assert result == "fake-chat-model"
     assert captured["model"] == "demo-standard-model"
     assert captured["model_provider"] == "openai"
+    # 新实现不再走 configurable_fields，所以 kwargs 里只剩固化的连接参数
     assert captured["kwargs"] == {
         "temperature": 0.4,
         "api_key": "demo-key",
         "base_url": "https://example.com/v1",
-        "configurable_fields": ("model", "model_provider", "temperature"),
-        "config_prefix": "llm",
     }
+
+
+def test_build_chat_model_for_profile_uses_qwen_adapter_with_thinking(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakePatchedQwenChatOpenAI:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setenv("LLM_PROFILE_DEFAULT", "standard")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "qwen-plus")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "qwen")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_MODEL", "qwen3-8b")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_PROVIDER", "qwen")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_TEMPERATURE", "0.4")
+    monkeypatch.setenv("OPENAI_API_KEY", "demo-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setattr("app.llm.provider.PatchedQwenChatOpenAI", _FakePatchedQwenChatOpenAI)
+
+    result = build_chat_model_for_profile("thinking")
+
+    assert isinstance(result, _FakePatchedQwenChatOpenAI)
+    assert captured["kwargs"] == {
+        "model": "qwen3-8b",
+        "model_provider": "qwen",
+        "temperature": 0.4,
+        "api_key": "demo-key",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "extra_body": {"enable_thinking": True},
+    }
+
+
+def test_build_chat_models_by_profile_returns_one_per_profile(monkeypatch):
+    init_calls: list[tuple[str, dict]] = []
+
+    def _fake_init_chat_model(model, *, model_provider=None, **kwargs):
+        init_calls.append((model, kwargs))
+        return f"chat-model-{model}"
+
+    monkeypatch.setenv("LLM_PROFILE_DEFAULT", "standard")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "model-a")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_MODEL", "model-b")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_PROFILE_THINKING_TEMPERATURE", "0.4")
+    monkeypatch.setenv("OPENAI_API_KEY", "demo-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
+    monkeypatch.setattr("app.llm.provider.init_chat_model", _fake_init_chat_model)
+
+    models = build_chat_models_by_profile()
+
+    assert set(models.keys()) == {"standard", "thinking"}
+    assert models["standard"] == "chat-model-model-a"
+    assert models["thinking"] == "chat-model-model-b"
+    assert {entry[0] for entry in init_calls} == {"model-a", "model-b"}
 
 
 def test_load_llm_profile_registry_reads_standard_and_thinking_profiles(monkeypatch):
@@ -61,7 +117,7 @@ def test_load_llm_profile_registry_reads_standard_and_thinking_profiles(monkeypa
     assert registry.profiles["thinking"].temperature == 0.6
 
 
-def test_profile_resolution_and_configurable_values(monkeypatch):
+def test_profile_resolution(monkeypatch):
     monkeypatch.delenv("LLM_PROFILE_DEFAULT", raising=False)
     monkeypatch.delenv("LLM_PROFILE_STANDARD_MODEL", raising=False)
     monkeypatch.delenv("LLM_PROFILE_STANDARD_PROVIDER", raising=False)
@@ -69,7 +125,6 @@ def test_profile_resolution_and_configurable_values(monkeypatch):
     monkeypatch.delenv("LLM_PROFILE_THINKING_MODEL", raising=False)
     monkeypatch.delenv("LLM_PROFILE_THINKING_PROVIDER", raising=False)
     monkeypatch.delenv("LLM_PROFILE_THINKING_TEMPERATURE", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("LLM_MODEL", "shared-model")
     monkeypatch.setenv("LLM_MODEL_PROVIDER", "openai")
     monkeypatch.setenv("LLM_TEMPERATURE", "0.2")
@@ -80,65 +135,3 @@ def test_profile_resolution_and_configurable_values(monkeypatch):
     assert resolve_llm_profile_key(None) == "standard"
     assert resolve_llm_profile_key("thinking") == "thinking"
     assert coerce_llm_profile_key("missing") == "standard"
-    assert get_llm_configurable("thinking") == {
-        "llm_model": "shared-model",
-        "llm_model_provider": "openai",
-        "llm_temperature": 0.2,
-    }
-
-
-def test_build_chat_model_uses_qwen_adapter_for_qwen_provider(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class _FakePatchedQwenChatOpenAI:
-        def __init__(self, **kwargs):
-            captured["kwargs"] = kwargs
-
-        def configurable_fields(self, **kwargs):
-            captured["configurable_fields"] = kwargs
-            return "fake-qwen-chat-model"
-
-    monkeypatch.setenv("LLM_PROFILE_DEFAULT", "thinking")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "qwen-plus")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "qwen")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
-    monkeypatch.setenv("LLM_PROFILE_THINKING_MODEL", "qwen3-8b")
-    monkeypatch.setenv("LLM_PROFILE_THINKING_PROVIDER", "qwen")
-    monkeypatch.setenv("LLM_PROFILE_THINKING_TEMPERATURE", "0.4")
-    monkeypatch.setenv("OPENAI_API_KEY", "demo-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    monkeypatch.setattr("app.llm.provider.PatchedQwenChatOpenAI", _FakePatchedQwenChatOpenAI)
-
-    result = build_chat_model()
-
-    assert result == "fake-qwen-chat-model"
-    assert captured["kwargs"] == {
-        "model": "qwen3-8b",
-        "model_provider": "qwen",
-        "temperature": 0.4,
-        "api_key": "demo-key",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "extra_body": {"enable_thinking": True},
-    }
-    configurable_fields = captured["configurable_fields"]
-    assert set(configurable_fields.keys()) == {"model_name", "model_provider", "temperature", "extra_body"}
-    assert configurable_fields["model_name"].id == "llm_model"
-    assert configurable_fields["extra_body"].id == "llm_extra_body"
-
-
-def test_get_llm_configurable_includes_qwen_thinking_extra_body(monkeypatch):
-    monkeypatch.setenv("LLM_PROFILE_DEFAULT", "standard")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "qwen-plus")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "qwen")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
-    monkeypatch.setenv("LLM_PROFILE_THINKING_MODEL", "qwen3-8b")
-    monkeypatch.setenv("LLM_PROFILE_THINKING_PROVIDER", "qwen")
-    monkeypatch.setenv("LLM_PROFILE_THINKING_TEMPERATURE", "0.4")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-
-    assert get_llm_configurable("thinking") == {
-        "llm_model": "qwen3-8b",
-        "llm_model_provider": "qwen",
-        "llm_temperature": 0.4,
-        "llm_extra_body": {"enable_thinking": True},
-    }

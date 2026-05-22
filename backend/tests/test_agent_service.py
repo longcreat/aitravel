@@ -21,9 +21,10 @@ class _FakeAgent:
         assert context.locale == "zh-CN"
         assert context.model_profile_key == "standard"
         assert context.session_meta == {}
-        assert config["configurable"]["llm_model"] == "test-standard-model"
-        assert config["configurable"]["llm_model_provider"] == "openai"
-        assert config["configurable"]["llm_temperature"] == 0.2
+        # 新实现里 llm 配置不再走 configurable_fields，model 切换由
+        # ModelSelectionMiddleware 通过 request.override(model=...) 完成。
+        assert "llm_model" not in config["configurable"]
+        assert config["configurable"]["thread_id"] == "thread-1"
         assert stream_mode == ["messages", "updates"]
         assert version == "v2"
         assert _payload == {"messages": [HumanMessage(content="帮我规划日本行程")]}
@@ -133,7 +134,7 @@ class _CaptureInputAgent:
         assert stream_mode == ["messages", "updates"]
         assert version == "v2"
         self.calls.append(list(payload["messages"]))
-        assert config["configurable"]["llm_model"] == "test-standard-model"
+        assert "llm_model" not in config["configurable"]
         self.contexts.append(context)
         yield {
             "type": "messages",
@@ -184,7 +185,7 @@ async def test_travel_agent_service_stream_invoke(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr("app.agent.runtime.load_mcp_connections", lambda _path: {})
     monkeypatch.setattr("app.agent.runtime.load_mcp_tools", _fake_load_mcp_tools)
-    monkeypatch.setattr("app.agent.runtime.build_chat_model", lambda: "fake-model")
+    monkeypatch.setattr("app.agent.runtime.build_chat_models_by_profile", lambda: {"standard": "fake-model", "thinking": "fake-thinking-model"})
     dummy_checkpointer = _DummyCheckpointer()
     monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
@@ -216,11 +217,25 @@ async def test_travel_agent_service_stream_invoke(monkeypatch: pytest.MonkeyPatc
         events.append((event_name, payload))
 
     names = [name for name, _ in events]
-    assert names == ["turn.start", "part.delta", "part.delta", "tool.start", "tool.done", "message.completed", "turn.done"]
+    assert names == [
+        "turn.start",
+        "part.delta",         # 第一段文本 chunk
+        "part.delta",         # 第二段文本 chunk（合并到同一个 part）
+        "part.delta",         # 工具来临前的 sealing（status=completed, 空 delta）
+        "tool.start",
+        "tool.done",
+        "message.completed",
+        "turn.done",
+    ]
     assert events[0][1]["user_message"]["text"] == "帮我规划日本行程"
     assert events[0][1]["assistant_message"]["status"] == "streaming"
     assert events[1][1]["text_delta"] == "推荐先去东京，"
-    assert events[3][1]["part"]["tool_name"] == "get_current_time"
+    assert events[2][1]["text_delta"] == "再去大阪。"
+    # 第三个 part.delta 是 sealing：part_id 与之前相同，但 text_delta 为空，status=completed
+    assert events[3][1]["part_id"] == events[1][1]["part_id"]
+    assert events[3][1]["text_delta"] == ""
+    assert events[3][1]["status"] == "completed"
+    assert events[4][1]["part"]["tool_name"] == "get_current_time"
     assert events[-2][1]["message"]["text"] == "推荐先去东京，再去大阪。"
     assert events[-2][1]["message"]["status"] == "completed"
 
@@ -251,7 +266,7 @@ async def test_travel_agent_service_stream_invoke_without_token_events(
 
     monkeypatch.setattr("app.agent.runtime.load_mcp_connections", lambda _path: {})
     monkeypatch.setattr("app.agent.runtime.load_mcp_tools", _fake_load_mcp_tools)
-    monkeypatch.setattr("app.agent.runtime.build_chat_model", lambda: "fake-model")
+    monkeypatch.setattr("app.agent.runtime.build_chat_models_by_profile", lambda: {"standard": "fake-model", "thinking": "fake-thinking-model"})
     dummy_checkpointer = _DummyCheckpointer()
     monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
@@ -297,7 +312,7 @@ async def test_travel_agent_service_persists_reasoning_text(
 
     monkeypatch.setattr("app.agent.runtime.load_mcp_connections", lambda _path: {})
     monkeypatch.setattr("app.agent.runtime.load_mcp_tools", _fake_load_mcp_tools)
-    monkeypatch.setattr("app.agent.runtime.build_chat_model", lambda: "fake-model")
+    monkeypatch.setattr("app.agent.runtime.build_chat_models_by_profile", lambda: {"standard": "fake-model", "thinking": "fake-thinking-model"})
     dummy_checkpointer = _DummyCheckpointer()
     monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "qwen-plus")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "qwen")
@@ -351,7 +366,7 @@ async def test_travel_agent_service_uses_latest_human_message_as_agent_input(
 
     monkeypatch.setattr("app.agent.runtime.load_mcp_connections", lambda _path: {})
     monkeypatch.setattr("app.agent.runtime.load_mcp_tools", _fake_load_mcp_tools)
-    monkeypatch.setattr("app.agent.runtime.build_chat_model", lambda: "fake-model")
+    monkeypatch.setattr("app.agent.runtime.build_chat_models_by_profile", lambda: {"standard": "fake-model", "thinking": "fake-thinking-model"})
     dummy_checkpointer = _DummyCheckpointer()
     monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
@@ -417,7 +432,7 @@ async def test_travel_agent_service_startup_uses_context_schema_and_middleware(
 
     monkeypatch.setattr("app.agent.runtime.load_mcp_connections", lambda _path: {})
     monkeypatch.setattr("app.agent.runtime.load_mcp_tools", _fake_load_mcp_tools)
-    monkeypatch.setattr("app.agent.runtime.build_chat_model", lambda: "fake-model")
+    monkeypatch.setattr("app.agent.runtime.build_chat_models_by_profile", lambda: {"standard": "fake-model", "thinking": "fake-thinking-model"})
     dummy_checkpointer = _DummyCheckpointer()
 
     async def _fake_build_memory_runtime(_path: Path):
@@ -437,4 +452,8 @@ async def test_travel_agent_service_startup_uses_context_schema_and_middleware(
     assert captured["context_schema"].__name__ == "AgentRequestContext"
     middleware = captured["middleware"]
     assert isinstance(middleware, list)
-    assert len(middleware) == 2
+    # 两个固定 middleware（dynamic_prompt + tool_error_boundary）
+    # 加上动态注入的 ModelSelectionMiddleware
+    assert len(middleware) == 3
+    middleware_names = [type(m).__name__ for m in middleware]
+    assert "ModelSelectionMiddleware" in middleware_names

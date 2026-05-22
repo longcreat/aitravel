@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from app.agent.context import AgentRequestContext
 from app.agent.presentation import _content_to_text, _tool_message_payload
 from app.agent.runtime import AgentRuntimeService
-from app.llm.provider import get_llm_configurable
 from app.schemas.chat import (
     ChatMessagePart,
     ChatReasoningPart,
@@ -66,7 +65,6 @@ class AgentStreamService:
 
         configurable: dict[str, Any] = {
             "thread_id": thread_id,
-            **get_llm_configurable(model_profile_key),
         }
         if checkpoint_id:
             configurable["checkpoint_id"] = checkpoint_id
@@ -95,6 +93,15 @@ class AgentStreamService:
                         chunk_text = _content_to_text(message_chunk.content)
                         if chunk_text.strip():
                             on_assistant_text_chunk(chunk_text)
+                    # 当本 chunk 含工具调用时，先收尾仍在 streaming 的 reasoning/text，
+                    # 避免前端 chip 永远显示 "思考中"。
+                    if _chunk_has_tool_call(message_chunk):
+                        for sealed_payload in _seal_payloads(
+                            _seal_streaming_text_like_parts(state),
+                            assistant_message_id,
+                            version_id,
+                        ):
+                            yield "part.delta", sealed_payload.model_dump()
                     for tool_payload in _chunk_to_tool_start_payloads(
                         state,
                         assistant_message_id=assistant_message_id,
@@ -117,6 +124,14 @@ class AgentStreamService:
                     seen_returned=state.seen_returned,
                 ):
                     state.streamed_tool_traces.append(trace)
+                    # 工具事件来临前，确保上一段 reasoning/text 已被收尾通知前端
+                    if trace.phase == "called":
+                        for sealed_payload in _seal_payloads(
+                            _seal_streaming_text_like_parts(state),
+                            assistant_message_id,
+                            version_id,
+                        ):
+                            yield "part.delta", sealed_payload.model_dump()
                     # 工具返回时提取引用来源
                     if event_type == "tool_returned":
                         sources = _extract_citation_sources_from_trace(trace)
@@ -224,7 +239,8 @@ def _chunk_to_part_deltas(
     payloads: list[PartDeltaPayload] = []
     reasoning_text = _message_reasoning_text(chunk)
     if reasoning_text:
-        part = _append_text_like_part(state, part_type="reasoning", delta=reasoning_text)
+        part, sealed = _append_text_like_part(state, part_type="reasoning", delta=reasoning_text)
+        payloads.extend(_seal_payloads(sealed, assistant_message_id, version_id))
         payloads.append(
             PartDeltaPayload(
                 message_id=assistant_message_id,
@@ -237,7 +253,8 @@ def _chunk_to_part_deltas(
 
     chunk_text = _content_to_text(chunk.content)
     if chunk_text:
-        part = _append_text_like_part(state, part_type="text", delta=chunk_text)
+        part, sealed = _append_text_like_part(state, part_type="text", delta=chunk_text)
+        payloads.extend(_seal_payloads(sealed, assistant_message_id, version_id))
         payloads.append(
             PartDeltaPayload(
                 message_id=assistant_message_id,
@@ -288,6 +305,15 @@ def _chunk_to_tool_start_payloads(
     return payloads
 
 
+def _chunk_has_tool_call(chunk: AIMessageChunk) -> bool:
+    """判断 AI chunk 里是否携带工具调用增量。"""
+    if getattr(chunk, "tool_calls", None):
+        return True
+    if getattr(chunk, "tool_call_chunks", None):
+        return True
+    return False
+
+
 def _iter_chunk_tool_calls(chunk: AIMessageChunk):
     """提取 chunk 中当前可识别的工具调用。"""
     yielded_ids: set[str] = set()
@@ -331,17 +357,59 @@ def _iter_chunk_tool_calls(chunk: AIMessageChunk):
         }
 
 
+def _seal_streaming_text_like_parts(state: StreamRunState) -> list[ChatTextPart | ChatReasoningPart]:
+    """把当前所有仍处于 streaming 状态的 reasoning / text part 标记为 completed。
+
+    用于流式过程中切换到不同类型 part（例如 reasoning → tool）时收尾上一段，
+    避免前端 chip 永远停留在 "思考中"。返回被收尾的 part 列表，便于调用方
+    向前端发送状态变更事件。
+    """
+    sealed: list[ChatTextPart | ChatReasoningPart] = []
+    for part in state.ui_parts:
+        if part.type in {"reasoning", "text"} and part.status == "streaming":  # type: ignore[union-attr]
+            part.status = "completed"  # type: ignore[union-attr]
+            sealed.append(part)  # type: ignore[arg-type]
+    return sealed
+
+
+def _seal_payloads(
+    sealed: list[ChatTextPart | ChatReasoningPart],
+    assistant_message_id: str,
+    version_id: str,
+) -> list[PartDeltaPayload]:
+    """把被收尾的 text-like part 转换为 part.delta 通知（不带文字增量，只更新状态）。"""
+    return [
+        PartDeltaPayload(
+            message_id=assistant_message_id,
+            version_id=version_id,
+            part_id=part.id,
+            part_type=part.type,  # type: ignore[arg-type]
+            text_delta="",
+            status="completed",
+        )
+        for part in sealed
+    ]
+
+
 def _append_text_like_part(
     state: StreamRunState,
     *,
     part_type: str,
     delta: str,
-) -> ChatTextPart | ChatReasoningPart:
+) -> tuple[ChatTextPart | ChatReasoningPart, list[ChatTextPart | ChatReasoningPart]]:
+    """追加一段 text / reasoning。
+
+    如果上一段 part 是不同类型，会先把所有仍 streaming 的 text-like part 标记为
+    completed 并返回它们，调用方据此发送收尾 delta。
+    """
+    sealed: list[ChatTextPart | ChatReasoningPart] = []
     last_part = state.ui_parts[-1] if state.ui_parts else None
     if last_part is not None and last_part.type == part_type:
         last_part.text += delta  # type: ignore[attr-defined]
         last_part.status = "streaming"  # type: ignore[attr-defined]
-        return last_part  # type: ignore[return-value]
+        return last_part, sealed  # type: ignore[return-value]
+
+    sealed = _seal_streaming_text_like_parts(state)
 
     if part_type == "reasoning":
         state.reasoning_part_index += 1
@@ -350,7 +418,7 @@ def _append_text_like_part(
         state.text_part_index += 1
         part = ChatTextPart(id=f"text-{state.text_part_index}", text=delta, status="streaming")
     state.ui_parts.append(part)
-    return part
+    return part, sealed
 
 
 def _trace_to_tool_part_payload(

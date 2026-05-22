@@ -7,10 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
 
 from app.agent.context import AgentRequestContext
 from app.agent.middleware import build_agent_middleware
-from app.llm.provider import build_chat_model
+from app.llm.provider import (
+    build_chat_models_by_profile,
+    coerce_llm_profile_key,
+    get_default_llm_profile_key,
+)
 from app.mcp.client import MCPToolBundle, load_mcp_tools
 from app.mcp.config import load_mcp_connections
 from app.tool.local_tools import get_local_tools
@@ -34,7 +39,9 @@ class AgentRuntime:
         local_tool_names: 本地工具名，用于运行时快照展示。
         checkpointer: SQLite checkpointer，按用户拼装 agent 时复用。
         store: LangGraph store（当前未启用）。
-        model: 共享 chat model 实例。
+        chat_models_by_profile: 每个 LLM 档位对应的 ChatModel 实例，由 middleware
+            按 `request.runtime.context.model_profile_key` 动态选择。
+        default_profile_key: 默认档位 key，作为 agent 注册时的 fallback model。
     """
 
     agent: Any
@@ -43,7 +50,12 @@ class AgentRuntime:
     local_tool_names: list[str]
     checkpointer: Any
     store: Any
-    model: Any
+    chat_models_by_profile: dict[str, BaseChatModel]
+    default_profile_key: str
+
+    @property
+    def default_model(self) -> BaseChatModel:
+        return self.chat_models_by_profile[self.default_profile_key]
 
 
 class AgentRuntimeService:
@@ -75,12 +87,18 @@ class AgentRuntimeService:
         mcp_bundle = await load_mcp_tools(connections)
 
         checkpointer, store = await build_memory_runtime(self._sqlite_db_path)
-        model = build_chat_model()
+        chat_models_by_profile = build_chat_models_by_profile()
+        default_profile_key = coerce_llm_profile_key(get_default_llm_profile_key())
+        default_model = chat_models_by_profile[default_profile_key]
+
         agent = create_agent(
-            model=model,
+            model=default_model,
             tools=[*local_tools, *mcp_bundle.tools],
             context_schema=AgentRequestContext,
-            middleware=build_agent_middleware(),
+            middleware=build_agent_middleware(
+                chat_models_by_profile=chat_models_by_profile,
+                default_profile_key=default_profile_key,
+            ),
             checkpointer=checkpointer,
             store=store,
         )
@@ -92,7 +110,8 @@ class AgentRuntimeService:
             local_tool_names=[tool.name for tool in local_tools],
             checkpointer=checkpointer,
             store=store,
-            model=model,
+            chat_models_by_profile=chat_models_by_profile,
+            default_profile_key=default_profile_key,
         )
 
     def build_user_agent(self, extra_tools: list[Any]) -> Any:
@@ -101,10 +120,13 @@ class AgentRuntimeService:
         if not extra_tools:
             return runtime.agent
         return create_agent(
-            model=runtime.model,
+            model=runtime.default_model,
             tools=[*runtime.local_tools, *runtime.mcp_bundle.tools, *extra_tools],
             context_schema=AgentRequestContext,
-            middleware=build_agent_middleware(),
+            middleware=build_agent_middleware(
+                chat_models_by_profile=runtime.chat_models_by_profile,
+                default_profile_key=runtime.default_profile_key,
+            ),
             checkpointer=runtime.checkpointer,
             store=runtime.store,
         )

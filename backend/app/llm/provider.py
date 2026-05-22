@@ -1,4 +1,8 @@
-"""LLM 提供方与模型档位配置。"""
+"""LLM 提供方与模型档位配置。
+
+每个档位（标准 / 思考）在进程启动时实例化为一个独立的 ChatModel。运行时由
+`model_selection_middleware` 通过 `request.override(model=...)` 选择实际使用的实例。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,6 @@ from typing import Any, Literal
 
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
-from langchain_core.runnables import ConfigurableField
 
 from app.llm.qwen_chat_openai import PatchedQwenChatOpenAI
 
@@ -80,13 +83,23 @@ def _is_qwen_model(model: str) -> bool:
 
 
 def _uses_qwen_chat_adapter(profile: LLMProfile, connection: LLMConnectionSettings) -> bool:
+    """判断该档位是否需要走百炼/Qwen 兼容适配器。"""
     normalized_provider = _normalize_provider(profile.model_provider)
     if normalized_provider == "qwen":
         return True
-    return normalized_provider == "openai" and _is_dashscope_base_url(connection.base_url) and _is_qwen_model(profile.model)
+    return (
+        normalized_provider == "openai"
+        and _is_dashscope_base_url(connection.base_url)
+        and _is_qwen_model(profile.model)
+    )
 
 
 def _build_qwen_extra_body(profile: LLMProfile) -> dict[str, Any] | None:
+    """生成传给百炼 OpenAI 兼容接口的 extra_body。
+
+    - QwQ 系列模型：仅思考模式，不需要 enable_thinking
+    - 其他混合思考模型：根据档位 kind 决定 enable_thinking 真假
+    """
     normalized_model = profile.model.strip().lower()
     if normalized_model.startswith("qwq") or "thinking" in normalized_model:
         return None
@@ -97,12 +110,16 @@ def load_llm_profile_registry() -> LLMProfileRegistry:
     """从环境变量读取当前可用模型档位。"""
     standard_model = _env("LLM_PROFILE_STANDARD_MODEL", _env("LLM_MODEL", _DEFAULT_MODEL))
     standard_provider = _env("LLM_PROFILE_STANDARD_PROVIDER", _env("LLM_MODEL_PROVIDER", _DEFAULT_PROVIDER))
-    standard_temperature = float(_env("LLM_PROFILE_STANDARD_TEMPERATURE", _env("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE)) or _DEFAULT_TEMPERATURE)
+    standard_temperature = float(
+        _env("LLM_PROFILE_STANDARD_TEMPERATURE", _env("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE))
+        or _DEFAULT_TEMPERATURE
+    )
 
     thinking_model = _env("LLM_PROFILE_THINKING_MODEL", standard_model)
     thinking_provider = _env("LLM_PROFILE_THINKING_PROVIDER", standard_provider)
     thinking_temperature = float(
-        _env("LLM_PROFILE_THINKING_TEMPERATURE", _env("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE)) or _DEFAULT_TEMPERATURE
+        _env("LLM_PROFILE_THINKING_TEMPERATURE", _env("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE))
+        or _DEFAULT_TEMPERATURE
     )
 
     profiles = {
@@ -170,25 +187,14 @@ def get_llm_profile(profile_key: str | None) -> LLMProfile:
     return registry.profiles[resolved_key]
 
 
-def get_llm_configurable(profile_key: str | None) -> dict[str, Any]:
-    """生成写入 LangChain runtime configurable 的模型配置。"""
+def build_chat_model_for_profile(profile_key: str) -> BaseChatModel:
+    """为指定档位实例化一个 ChatModel。
+
+    各档位独立实例化，所有运行时差异（model 名、temperature、extra_body 里的
+    enable_thinking）都在实例化时固化。运行时通过 middleware 用 `request.override(
+    model=...)` 来切换。
+    """
     profile = get_llm_profile(profile_key)
-    connection = load_llm_connection_settings()
-    configurable = {
-        "llm_model": profile.model,
-        "llm_model_provider": profile.model_provider,
-        "llm_temperature": profile.temperature,
-    }
-    if _uses_qwen_chat_adapter(profile, connection):
-        extra_body = _build_qwen_extra_body(profile)
-        if extra_body is not None:
-            configurable["llm_extra_body"] = extra_body
-    return configurable
-
-
-def build_chat_model() -> BaseChatModel:
-    """构建 LangChain 官方 runtime-configurable 聊天模型。"""
-    profile = get_llm_profile(get_default_llm_profile_key())
     connection = load_llm_connection_settings()
     if _uses_qwen_chat_adapter(profile, connection):
         return PatchedQwenChatOpenAI(
@@ -198,11 +204,6 @@ def build_chat_model() -> BaseChatModel:
             api_key=connection.api_key,
             base_url=connection.base_url,
             extra_body=_build_qwen_extra_body(profile),
-        ).configurable_fields(
-            model_name=ConfigurableField(id="llm_model"),
-            model_provider=ConfigurableField(id="llm_model_provider"),
-            temperature=ConfigurableField(id="llm_temperature"),
-            extra_body=ConfigurableField(id="llm_extra_body"),
         )
     return init_chat_model(
         profile.model,
@@ -210,6 +211,10 @@ def build_chat_model() -> BaseChatModel:
         temperature=profile.temperature,
         api_key=connection.api_key,
         base_url=connection.base_url,
-        configurable_fields=("model", "model_provider", "temperature"),
-        config_prefix="llm",
     )
+
+
+def build_chat_models_by_profile() -> dict[str, BaseChatModel]:
+    """为所有已注册档位预先构建 ChatModel 实例，供 middleware 在运行时按需选择。"""
+    registry = load_llm_profile_registry()
+    return {key: build_chat_model_for_profile(key) for key in registry.profiles}
