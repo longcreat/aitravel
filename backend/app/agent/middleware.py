@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -23,6 +25,35 @@ from app.prompt.system import TRAVEL_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_TIMEZONE = "Asia/Shanghai"
+_WEEKDAY_ZH = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+def _resolve_timezone(timezone_name: str) -> tuple[str, Any]:
+    """解析时区，回退到固定偏移；返回 (canonical_name, tzinfo)。"""
+    try:
+        return timezone_name, ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        fallback = {
+            "Asia/Shanghai": dt_timezone(timedelta(hours=8), name="Asia/Shanghai"),
+            "UTC": dt_timezone.utc,
+        }.get(timezone_name)
+        if fallback is not None:
+            return timezone_name, fallback
+        # 未知时区，回退到默认
+        return _DEFAULT_TIMEZONE, dt_timezone(timedelta(hours=8), name=_DEFAULT_TIMEZONE)
+
+
+def _format_runtime_clock(timezone_name: str, *, now: datetime | None = None) -> str:
+    """返回提示词里展示的 "当前时间" 行。"""
+    canonical, tzinfo = _resolve_timezone(timezone_name)
+    current = now.astimezone(tzinfo) if now is not None else datetime.now(tzinfo)
+    weekday = _WEEKDAY_ZH[current.weekday()]
+    return (
+        f"- 当前时间：{current.strftime('%Y-%m-%d %H:%M')} {weekday} "
+        f"（{canonical}，UTC{current.strftime('%z')}）"
+    )
+
 
 def _serialize_session_meta(session_meta: dict[str, Any]) -> str:
     """把 session_meta 稳定序列化成 prompt 可读文本。"""
@@ -37,13 +68,18 @@ def build_runtime_system_prompt(context: AgentRequestContext) -> str:
     prompt = TRAVEL_SYSTEM_PROMPT
     context_lines: list[str] = []
 
+    # 时间感知：每次请求都注入"当前时间"，避免模型用预训练数据猜测当下日期。
+    timezone_name = _DEFAULT_TIMEZONE
+    if context.session_meta:
+        ctx_tz = context.session_meta.get("timezone")
+        if isinstance(ctx_tz, str) and ctx_tz.strip():
+            timezone_name = ctx_tz.strip()
+    context_lines.append(_format_runtime_clock(timezone_name))
+
     if context.locale and context.locale != "zh-CN":
         context_lines.append(f"- 优先使用语言环境：{context.locale}")
     if context.session_meta:
         context_lines.append(f"- 会话元信息：{_serialize_session_meta(context.session_meta)}")
-
-    if not context_lines:
-        return prompt
 
     return "\n".join(
         [
@@ -60,7 +96,15 @@ def travel_dynamic_prompt(request: ModelRequestT[AgentRequestContext]) -> str:
     """按运行时上下文动态拼装系统提示词。"""
     runtime_context = request.runtime.context if request.runtime is not None else None
     if runtime_context is None:
-        return TRAVEL_SYSTEM_PROMPT
+        # 未拿到 runtime context 也至少注入当前时间
+        return "\n".join(
+            [
+                TRAVEL_SYSTEM_PROMPT,
+                "",
+                "运行时上下文：",
+                _format_runtime_clock(_DEFAULT_TIMEZONE),
+            ]
+        )
     return build_runtime_system_prompt(runtime_context)
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, is_dataclass
 import json
 import re
+from collections.abc import Iterable, Mapping
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage, message_to_dict
@@ -527,9 +528,55 @@ def _serialize_native_value(value: Any) -> Any:
 
 _SRC_MARKER_RE = re.compile(r"\[src-(\d+)\]")
 
+# 工具 payload 中可被识别为"引用 URL"的字段名，按优先级排序。
+# 越靠前的字段越具体（如 bookingUrl 是酒店预订深链，比泛 url 更精确）。
+# 添加新领域字段时只需在此追加，不需要修改提取逻辑。
+_CITATION_URL_FIELDS: tuple[str, ...] = (
+    "bookingUrl",
+    "booking_url",
+    "url",
+    "link",
+    "href",
+    "sourceUrl",
+    "source_url",
+)
+
+# 工具 payload 中可被识别为"引用标题"的字段名，按优先级排序。
+_CITATION_TITLE_FIELDS: tuple[str, ...] = (
+    "title",
+    "name",
+    "hotelName",
+    "hotel_name",
+    "displayName",
+    "display_name",
+)
+
+
+def _pick_first_string(item: Mapping[str, Any], keys: Iterable[str]) -> str | None:
+    """按 keys 顺序找出第一个非空字符串值。"""
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _coerce_citation_from_dict(item: Mapping[str, Any]) -> CitationSource | None:
+    """从单条 dict 中提取一条引用；没有 URL 则视为不可引用。"""
+    url = _pick_first_string(item, _CITATION_URL_FIELDS)
+    if url is None:
+        return None
+    title = _pick_first_string(item, _CITATION_TITLE_FIELDS) or url
+    return CitationSource(url=url, title=title)
+
 
 def _extract_citation_sources_from_trace(trace: ToolTrace) -> list[CitationSource]:
-    """从工具返回的 payload（artifact）中提取引用来源。"""
+    """从工具返回的 payload（artifact）中提取引用来源。
+
+    实现是领域无关的：只看 payload 的形状（list[dict] 或 dict 内含 results 数组），
+    不针对具体工具或具体业务字段做硬编码。具体哪些字段算"URL/标题"由
+    ``_CITATION_URL_FIELDS`` / ``_CITATION_TITLE_FIELDS`` 控制，新增领域只需扩字段表。
+    """
     payload = trace.payload
     if payload is None:
         return []
@@ -547,29 +594,25 @@ def _extract_citation_sources_from_trace(trace: ToolTrace) -> list[CitationSourc
 
     sources: list[CitationSource] = []
 
-    # Exa 搜索结果 artifact: dict with "results" list
+    # 形状 A：dict 含 "results" 数组（Exa 搜索 / 多数 LLM-style web 工具）
     if isinstance(payload, dict):
         results = payload.get("results")
         if isinstance(results, list):
             for item in results:
-                if not isinstance(item, dict):
-                    continue
-                url = item.get("url")
-                title = item.get("title") or url or ""
-                if url:
-                    sources.append(CitationSource(url=str(url), title=str(title)))
+                if isinstance(item, dict):
+                    citation = _coerce_citation_from_dict(item)
+                    if citation is not None:
+                        sources.append(citation)
             if sources:
                 return sources
 
-    # MCP 工具: payload 为 list[dict] 如酒店列表，检查 bookingUrl/url 字段
+    # 形状 B：直接是 list[dict]（典型如酒店列表 / POI 列表 / 文档列表）
     if isinstance(payload, list):
         for item in payload:
-            if not isinstance(item, dict):
-                continue
-            url = item.get("bookingUrl") or item.get("url") or item.get("link")
-            title = item.get("hotelName") or item.get("name") or item.get("title") or ""
-            if url:
-                sources.append(CitationSource(url=str(url), title=str(title)))
+            if isinstance(item, dict):
+                citation = _coerce_citation_from_dict(item)
+                if citation is not None:
+                    sources.append(citation)
         return sources
 
     return sources

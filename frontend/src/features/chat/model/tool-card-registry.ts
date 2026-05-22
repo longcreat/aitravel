@@ -4,6 +4,14 @@
  * 遵循主流 Agent 框架（ChatGPT / Gemini / Kimi / Doubao）的模式：
  * 通过 tool_name 识别工具类型，解析 output 并返回类型化的卡片数据。
  *
+ * 设计要点
+ * - `ToolCardResolver` 是一个领域适配器：每种卡片类型（酒店 / 航班 / POI ...）
+ *   提供一个 resolver，自己声明匹配的工具名规则与 schema 校验。
+ * - 添加新卡片类型只需 ① 扩展 `ToolCardData` 联合类型 ② 写一个 resolver 注册到
+ *   `cardResolvers`，**不需要修改 `resolveToolCard` 自身**。
+ * - 工具名匹配规则（如 `/hotel/i.test(...)`）仅出现在各 resolver 内部，绝不
+ *   泄漏到顶层路由代码。
+ *
  * LangChain 对齐：
  * - tool output 来自 ToolMessage.artifact 或 ToolMessage.content
  * - 前端根据 tool_name + output schema 决定渲染方式
@@ -43,7 +51,7 @@ export type ToolCardData =
   ;
 
 // ──────────────────────────────────────────────
-// Detection & parsing
+// Generic helpers (与领域无关)
 // ──────────────────────────────────────────────
 
 /**
@@ -62,6 +70,53 @@ function tryParseOutput(output: unknown): unknown {
   }
   return null;
 }
+
+/**
+ * 在对象的所有值中查找符合条件的列表，最多向下穿透一层（足以覆盖
+ * `{ structured_content: { hotelInformationList: [...] } }` 这类常见嵌套）。
+ */
+function findArrayByPredicate<T>(
+  obj: Record<string, unknown>,
+  extract: (arr: unknown[]) => T[] | null,
+  depth: 0 | 1 = 0,
+): T[] | null {
+  for (const val of Object.values(obj)) {
+    if (Array.isArray(val)) {
+      const items = extract(val);
+      if (items && items.length > 0) return items;
+    }
+  }
+  if (depth === 0) return null;
+  for (const val of Object.values(obj)) {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      const nested = findArrayByPredicate(val as Record<string, unknown>, extract, 0);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+// ──────────────────────────────────────────────
+// Card resolver protocol
+// ──────────────────────────────────────────────
+
+/**
+ * 一个领域卡片解析器：先用 `matchesToolName` 决定要不要接管这次调用，再
+ * 用 `parse` 把已经解析好的 JSON 结构转成 `ToolCardData`。
+ *
+ * 注意：`parse` 不再负责 JSON.parse，统一由顶层完成；这样 resolver 只关心
+ * 自己的 schema 判定。
+ */
+export interface ToolCardResolver {
+  /** 仅在工具名命中时尝试接管。匹配规则属于该领域的内部知识。 */
+  matchesToolName(toolName: string): boolean;
+  /** 已解析后的 JSON（dict / list / 标量）。返回 null 表示不适配该数据形状。 */
+  parse(parsed: unknown): ToolCardData | null;
+}
+
+// ──────────────────────────────────────────────
+// Hotel card resolver
+// ──────────────────────────────────────────────
 
 /**
  * 检测对象是否具有酒店类似的字段结构。
@@ -155,67 +210,66 @@ function extractHotelList(arr: unknown[]): HotelItem[] | null {
   return arr.filter(isHotelLike).map(normalizeHotelItem);
 }
 
+const hotelCardResolver: ToolCardResolver = {
+  matchesToolName(toolName) {
+    // 任何工具名包含 "hotel" 都视为可能产出酒店列表（大小写不敏感）。
+    // 真正的判定还要看 schema，因此匹配规则可以宽松。
+    return /hotel/i.test(toolName);
+  },
+  parse(parsed) {
+    if (parsed === null || parsed === undefined) return null;
+
+    // 情况 A: 直接是数组
+    if (Array.isArray(parsed)) {
+      const items = extractHotelList(parsed);
+      return items && items.length > 0 ? { type: "hotel_list", items } : null;
+    }
+
+    // 情况 B: dict
+    if (typeof parsed === "object") {
+      const obj = parsed as Record<string, unknown>;
+      // 顶层或一层嵌套里找数组
+      const found = findArrayByPredicate(obj, extractHotelList, 1);
+      if (found) return { type: "hotel_list", items: found };
+      // 情况 C: 单个酒店对象
+      if (isHotelLike(obj)) {
+        return { type: "hotel_list", items: [normalizeHotelItem(obj)] };
+      }
+    }
+
+    return null;
+  },
+};
+
 // ──────────────────────────────────────────────
-// Main API
+// Registry
 // ──────────────────────────────────────────────
 
 /**
- * 在对象的值中查找酒店数组。
- * 遍历所有值，找到第一个可被解析为酒店列表的数组。
+ * 已注册的卡片解析器，按优先级从高到低排列。
+ * 第一个 `matchesToolName + parse` 都成功的会赢。
  */
-function findHotelArray(obj: Record<string, unknown>): HotelItem[] | null {
-  for (const val of Object.values(obj)) {
-    if (Array.isArray(val)) {
-      const items = extractHotelList(val);
-      if (items && items.length > 0) return items;
-    }
-  }
-  return null;
-}
+const cardResolvers: ToolCardResolver[] = [
+  hotelCardResolver,
+  // 新增航班/POI/订单等卡片，只需在此追加新的 resolver。
+];
 
 /**
  * 根据 tool_name 和 output 尝试解析卡片数据。
  * 返回 null 表示不适合卡片展示（回退为默认行为）。
- *
- * 遵循主流 Agent 模式：tool_name → 类型路由 → schema 验证 → 结构化数据
  */
 export function resolveToolCard(toolName: string, output: unknown): ToolCardData | null {
-  // Step 1: tool_name 路由（主流 Agent 均通过工具名判断渲染类型）
-  const isHotelTool = /hotel/i.test(toolName);
-  if (!isHotelTool) return null;
+  // 顶层只做：工具名匹配 → JSON 解析 → 委托给 resolver。
+  // 任何具体领域字段（hotel / flight / poi）都不应出现在这里。
+  const candidates = cardResolvers.filter((r) => r.matchesToolName(toolName));
+  if (candidates.length === 0) return null;
 
-  // Step 2: 解析 output
   const parsed = tryParseOutput(output);
   if (parsed === null) return null;
 
-  // Step 3: 检测数据结构
-  // 情况 A: 直接是数组
-  if (Array.isArray(parsed)) {
-    const items = extractHotelList(parsed);
-    if (items && items.length > 0) return { type: "hotel_list", items };
-    return null;
+  for (const resolver of candidates) {
+    const card = resolver.parse(parsed);
+    if (card) return card;
   }
-
-  // 情况 B: 嵌套在对象中
-  if (typeof parsed === "object" && parsed !== null) {
-    const obj = parsed as Record<string, unknown>;
-    // 尝试直接在顶层找数组字段
-    const found = findHotelArray(obj);
-    if (found) return { type: "hotel_list", items: found };
-
-    // 尝试一层嵌套（rollinggo 格式: { structured_content: { hotelInformationList: [...] } }）
-    for (const val of Object.values(obj)) {
-      if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-        const nested = findHotelArray(val as Record<string, unknown>);
-        if (nested) return { type: "hotel_list", items: nested };
-      }
-    }
-
-    // 情况 C: 单个酒店对象
-    if (isHotelLike(obj)) {
-      return { type: "hotel_list", items: [normalizeHotelItem(obj)] };
-    }
-  }
-
   return null;
 }
