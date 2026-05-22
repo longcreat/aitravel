@@ -13,6 +13,7 @@ from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.connectors import router as connectors_router
 from app.api.deps import get_agent_service
+from app.branding import BRAND_NAME
 from app.db.bootstrap import bootstrap_sqlite_database
 from app.api.health import router as health_router
 from app.api.sessions import router as sessions_router
@@ -31,7 +32,7 @@ def create_app() -> FastAPI:
     """创建 FastAPI 应用实例并注册路由与生命周期事件。"""
     load_app_env()
     bootstrap_sqlite_database()
-    app = FastAPI(title="AI Travel Agent API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title=f"{BRAND_NAME} API", version="0.1.0", lifespan=lifespan)
 
     allow_origins = os.getenv("CORS_ALLOW_ORIGINS", "*").split(",")
     app.add_middleware(

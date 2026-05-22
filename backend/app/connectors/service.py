@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import httpx
 
+from app.branding import OAUTH_CLIENT_NAME_SUFFIX
 from app.connectors.crypto import decrypt_secret, encrypt_secret
 from app.connectors.oauth import (
     AuthorizationServerMetadata,
@@ -56,20 +57,30 @@ class ConnectorAuthorizationError(RuntimeError):
     """对外抛出的 connector 授权异常。"""
 
 
+class ConnectorConfigError(RuntimeError):
+    """connector 必填配置缺失时抛出（启动期校验）。"""
+
+
+def _require_env(name: str) -> str:
+    """读取必填环境变量；缺失或为空就直接抛错，避免静默使用 localhost 兜底。"""
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ConnectorConfigError(
+            f"Environment variable {name} is required for MCP connectors but is not set"
+        )
+    return value
+
+
 class ConnectorService:
     """协调 connector 目录、用户授权状态与 OAuth 流。"""
 
     def __init__(self, sqlite_db_path: Path) -> None:
         self._registry = ConnectorRegistry.load()
         self._store = ConnectorAuthStore(sqlite_db_path)
-        self._redirect_uri = os.getenv(
-            "CONNECTOR_REDIRECT_URL",
-            "http://localhost:8000/api/connectors/oauth/callback",
-        ).strip()
-        self._frontend_return_url = os.getenv(
-            "CONNECTOR_FRONTEND_RETURN_URL",
-            "http://localhost:5173/profile/connectors",
-        ).strip()
+        # OAuth redirect_uri 必须与 MCP server 注册时填写的完全一致；
+        # 前端 return_url 决定授权完成后跳回哪里。两者都不允许静默回退到 localhost。
+        self._redirect_uri = _require_env("CONNECTOR_REDIRECT_URL")
+        self._frontend_return_url = _require_env("CONNECTOR_FRONTEND_RETURN_URL")
 
     # ---- public API ----
 
@@ -291,7 +302,7 @@ class ConnectorService:
             secret = decrypt_secret(authorization.client_secret_enc)
             return authorization.client_id, secret
 
-        client_name = f"{definition.display_name} (AI Travel)"
+        client_name = f"{definition.display_name} ({OAUTH_CLIENT_NAME_SUFFIX})"
         registered = await register_client(
             server_metadata,
             redirect_uri=authorization.redirect_uri,

@@ -8,6 +8,8 @@ from typing import Any
 
 from langsmith import tracing_context
 
+from app.branding import APP_TRACE_TAG
+
 
 def _env_flag(name: str) -> bool:
     value = os.getenv(name, "").strip().lower()
@@ -45,7 +47,7 @@ def langsmith_trace_context(
         metadata.update(extra_metadata)
 
     project_name = os.getenv("LANGSMITH_PROJECT") or None
-    tags = ["ai-travel-agent", operation]
+    tags = [APP_TRACE_TAG, operation]
     return tracing_context(
         project_name=project_name,
         tags=tags,

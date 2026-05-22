@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from app.branding import DEFAULT_USER_NICKNAME
 from app.schemas.auth import AuthPurpose, AuthUser
 
 
@@ -83,7 +84,7 @@ class AuthSQLiteStore:
 
     def create_user(self, email: str) -> AuthUser:
         now = _utc_now_iso()
-        nickname = email.split("@", 1)[0].strip() or "旅行用户"
+        nickname = email.split("@", 1)[0].strip() or DEFAULT_USER_NICKNAME
         user_id = str(uuid4())
         with self._connection() as conn:
             conn.execute(

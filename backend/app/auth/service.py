@@ -19,6 +19,7 @@ import jwt
 from fastapi import HTTPException, status
 
 from app.auth.store import AuthSQLiteStore
+from app.branding import BRAND_NAME
 from app.schemas.auth import AuthPurpose, AuthTokenPayload, AuthUser, SendCodeResponse
 
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -143,20 +144,20 @@ class AuthService:
 
     def _build_email_subject(self, code: str) -> str:
         """构建验证码邮件主题。"""
-        return f"你的 WANDER AI 代码为 {code}"
+        return f"你的 {BRAND_NAME} 代码为 {code}"
 
     def _build_email_text_body(self, *, email: str, code: str, purpose: AuthPurpose) -> str:
         """构建纯文本邮件正文。"""
         action_text = "登录" if purpose == "login" else "注册"
         return (
-            f"WANDER AI 验证码\n\n"
+            f"{BRAND_NAME} 验证码\n\n"
             f"请输入以下验证码以继续{action_text}：\n\n"
             f"{code}\n\n"
             f"该验证码将在 {self._code_expire_minutes} 分钟后失效。\n"
-            f"如果不是你本人在尝试{action_text} WANDER AI，请忽略这封邮件。\n\n"
+            f"如果不是你本人在尝试{action_text} {BRAND_NAME}，请忽略这封邮件。\n\n"
             f"发送至：{email}\n\n"
             f"此致\n"
-            f"WANDER AI 团队\n"
+            f"{BRAND_NAME} 团队\n"
         )
 
     def _build_email_html_body(self, *, email: str, code: str, purpose: AuthPurpose) -> str:
@@ -168,13 +169,13 @@ class AuthService:
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WANDER AI 验证码</title>
+    <title>{BRAND_NAME} 验证码</title>
   </head>
   <body style="margin:0;background:#f6f4ee;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#2c2b28;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:24px;overflow:hidden;border:1px solid rgba(44,43,40,0.06);">
       <tr>
         <td style="padding:48px 40px 40px;">
-          <div style="font-size:36px;line-height:1.1;font-weight:700;letter-spacing:-0.04em;color:#2c2b28;">WANDER AI</div>
+          <div style="font-size:36px;line-height:1.1;font-weight:700;letter-spacing:-0.04em;color:#2c2b28;">{BRAND_NAME}</div>
           <div style="margin-top:32px;font-size:18px;line-height:1.8;color:#2c2b28;">
             输入此临时验证码以继续{action_text}：
           </div>
@@ -183,14 +184,14 @@ class AuthService:
           </div>
           <div style="margin-top:28px;font-size:16px;line-height:1.9;color:#5f696a;">
             该验证码将在 {self._code_expire_minutes} 分钟后失效。<br />
-            如果不是你本人在尝试{action_text} WANDER AI，请忽略这封邮件。
+            如果不是你本人在尝试{action_text} {BRAND_NAME}，请忽略这封邮件。
           </div>
           <div style="margin-top:28px;font-size:14px;line-height:1.8;color:#7a8c8f;">
             发送至：{email}
           </div>
           <div style="margin-top:36px;font-size:16px;line-height:1.9;color:#2c2b28;">
             谨致问候<br />
-            WANDER AI 团队
+            {BRAND_NAME} 团队
           </div>
         </td>
       </tr>
