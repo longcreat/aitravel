@@ -276,9 +276,17 @@ def _chunk_to_tool_start_payloads(
     version_id: str,
     chunk: AIMessageChunk,
 ) -> list[ToolPartPayload]:
-    """从 AI chunk 的 tool call 增量中尽早构建 running 工具 part。"""
+    """从 AI chunk 的 tool call 增量中尽早构建 running 工具 part。
+
+    DashScope / OpenAI 这种 OpenAI 兼容流式接口对 ``tool_call_chunks`` 的发送方式是:
+    第一帧带 ``id`` + ``name`` + 空 ``args``,后续帧只带 ``args`` 增量(``id`` / ``name``
+    都为 None,通过 ``index`` 关联)。所以我们必须读 ``state.accumulated_chunk``
+    才能拿到完整工具调用,**不能只看当前帧的 chunk**——单看当前帧后续增量会被
+    误判为 "无名工具调用" 直接丢弃。
+    """
     payloads: list[ToolPartPayload] = []
-    for call in _iter_chunk_tool_calls(chunk):
+    source_chunk = state.accumulated_chunk if state.accumulated_chunk is not None else chunk
+    for call in _iter_chunk_tool_calls(source_chunk):
         tool_name = str(call.get("name") or "").strip()
         if not tool_name:
             continue
@@ -445,7 +453,19 @@ def _trace_to_tool_part_payload(
             state.ui_parts.append(existing)
         else:
             existing.tool_name = trace.tool_name
-            existing.input = trace.payload
+            # 只有当新 payload 更"完整"时才覆盖,避免后续不完整的流式增量把已经
+            # 解析好的完整 dict 打回成中间状态字符串。判定标准:
+            #   - 新 payload 是 dict / list / 数字 / bool — 直接接受(它是结构化的)
+            #   - 已有的是 dict/list 而新的是 string/None — 拒绝(说明新值更原始)
+            #   - 其它情况 — 接受(等价或更新更长的字符串)
+            new_payload = trace.payload
+            old_payload = existing.input
+            if isinstance(new_payload, (dict, list)) or isinstance(new_payload, (int, float, bool)):
+                existing.input = new_payload
+            elif isinstance(old_payload, (dict, list)) and not isinstance(new_payload, (dict, list)):
+                pass  # 已有结构化值,不被原始字符串/None 覆盖
+            else:
+                existing.input = new_payload
             existing.status = "running"
         return ToolPartPayload(message_id=assistant_message_id, version_id=version_id, part=existing)
 
