@@ -17,6 +17,22 @@ export interface CitationSource {
   extras?: Record<string, unknown>;
 }
 
+/**
+ * 工具结果中提取出来的结构化卡片（酒店 / 机票 / POI / 行程 ...）。
+ *
+ * 后端按 ``card_type`` 决定 ``data`` 的具体形状（见 ``backend/app/agent/cards.py``），
+ * 前端在 ``card-renderer-registry`` 中按 ``card_type`` 注册渲染器即可。
+ *
+ * 新增卡片类型只需在前后端各加一处实现，不需要改流式管线 / chat-message 渲染。
+ */
+export interface StructuredCard {
+  type: "card";
+  id: string;
+  card_type: string;
+  data: Record<string, unknown>;
+  source_tool_call_id?: string | null;
+}
+
 export type ChatMessagePart =
   | {
       id: string;
@@ -39,6 +55,7 @@ export type ChatMessagePart =
       input?: unknown;
       output?: unknown;
       sources?: CitationSource[];
+      cards?: StructuredCard[];
       status: "running" | "success" | "error";
     };
 

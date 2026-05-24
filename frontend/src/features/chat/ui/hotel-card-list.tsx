@@ -8,8 +8,35 @@
  */
 
 import { MapPin, Star } from "lucide-react";
-import type { HotelItem } from "@/features/chat/model/tool-card-registry";
 import { useBrowser } from "@/shared/lib/browser";
+
+/**
+ * 酒店卡片渲染所需的字段集合（小驼峰）。
+ *
+ * 数据由后端 `app/agent/cards.py::HotelCardExtractor` 输出（见 `StructuredCard.data`），
+ * 字段均为可选——前端按存在性渲染，不对缺失字段做硬性要求。
+ */
+export interface HotelItem {
+  id?: string;
+  name: string;
+  brand?: string;
+  address?: string;
+  price?: number;
+  priceUnit?: string;
+  /** 售罄等"无价但已知不可订"的提示信息（来自 RollingGo 的 price.message）。 */
+  priceUnavailable?: string;
+  rating?: number;
+  star?: number;
+  imageUrl?: string;
+  bookingUrl?: string;
+  tags?: string[];
+  checkIn?: string;
+  checkOut?: string;
+  roomType?: string;
+  breakfast?: string;
+  /** 原始数据中的其他字段，保留供详情查看 */
+  [key: string]: unknown;
+}
 
 interface HotelCardListProps {
   items: HotelItem[];
@@ -43,7 +70,7 @@ function StarRating({ star }: { star: number }) {
   );
 }
 
-function HotelCard({ hotel, onOpenUrl }: { hotel: HotelItem; onOpenUrl: (url: string) => void }) {
+function HotelCardInner({ hotel, onOpenUrl }: { hotel: HotelItem; onOpenUrl: (url: string) => void }) {
   const displayName = hotel.name || "未知酒店";
   const hasImage = hotel.imageUrl && hotel.imageUrl !== "undefined" && hotel.imageUrl !== "";
 
@@ -159,7 +186,7 @@ export function HotelCardList({ items }: HotelCardListProps) {
     <div className="my-2 -mx-1">
       <div className="flex gap-2.5 overflow-x-auto px-1 pb-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
         {items.map((hotel, idx) => (
-          <HotelCard key={hotel.id || `hotel-${idx}`} hotel={hotel} onOpenUrl={openUrl} />
+          <HotelCardInner key={hotel.id || `hotel-${idx}`} hotel={hotel} onOpenUrl={openUrl} />
         ))}
       </div>
       <p className="mt-1 text-[11px] text-[#b0ab9f]">

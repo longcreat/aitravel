@@ -28,6 +28,7 @@ function toolPart(
     output?: unknown;
     status?: "running" | "success" | "error";
     toolCallId?: string;
+    cards?: import("@/features/chat/model/chat.types").StructuredCard[];
   },
 ) {
   return {
@@ -37,6 +38,7 @@ function toolPart(
     tool_name: toolName,
     input: options?.input,
     output: options?.output,
+    cards: options?.cards,
     status: options?.status ?? "success",
   };
 }
@@ -381,11 +383,41 @@ describe("ChatMessage", () => {
     expect(screen.getByRole("button", { name: "stop-speech-message-persisted-msg-77" })).toBeInTheDocument();
   });
 
-  it("renders hotel cards inline when tool output matches hotel schema", () => {
-    const hotelOutput = JSON.stringify([
-      { name: "如家酒店", price: 299, rating: 4.5, address: "北京朝阳区", star: 3, tags: ["近地铁", "含早"] },
-      { name: "汉庭酒店", price: 259, rating: 4.2, address: "北京海淀区", star: 3 },
-    ]);
+  it("renders hotel cards inline when tool part carries structured hotel cards", () => {
+    // 在新架构下，前端不再从 raw output 解析卡片：后端在工具返回时已通过
+    // app/agent/cards.py 解析出 StructuredCard 数组并挂在 part.cards 上。
+    // 前端只负责按 card_type 路由到对应渲染器。
+    const hotelCards = [
+      {
+        type: "card" as const,
+        id: "hotel-1",
+        card_type: "hotel",
+        data: {
+          name: "如家酒店",
+          price: 299,
+          rating: 4.5,
+          address: "北京朝阳区",
+          star: 3,
+          tags: ["近地铁", "含早"],
+          priceUnit: "CNY",
+        },
+        source_tool_call_id: "call-hotel-1",
+      },
+      {
+        type: "card" as const,
+        id: "hotel-2",
+        card_type: "hotel",
+        data: {
+          name: "汉庭酒店",
+          price: 259,
+          rating: 4.2,
+          address: "北京海淀区",
+          star: 3,
+          priceUnit: "CNY",
+        },
+        source_tool_call_id: "call-hotel-1",
+      },
+    ];
 
     const message: ChatMessageItem = {
       id: "assistant-hotel",
@@ -394,9 +426,9 @@ describe("ChatMessage", () => {
       parts: [
         toolPart("tool-hotel-1", "rollinggo-hotel_searchHotels", {
           input: { city: "北京", checkIn: "2026-05-01" },
-          output: hotelOutput,
           status: "success",
           toolCallId: "call-hotel-1",
+          cards: hotelCards,
         }),
         textPart("text-1", "我找到了以下酒店推荐："),
       ],

@@ -28,12 +28,11 @@ const sanitizeSchema = {
 };
 
 import { getToolDisplayName } from "@/features/chat/model/tool-display-name";
-import { resolveToolCard } from "@/features/chat/model/tool-card-registry";
-import type { ChatMessageItem, CitationSource } from "@/features/chat/model/chat.types";
+import { getCardListRenderer, groupCardsByType } from "@/features/chat/model/tool-card-registry";
+import type { ChatMessageItem, CitationSource, StructuredCard } from "@/features/chat/model/chat.types";
 import { useBrowser } from "@/shared/lib/browser";
 import { cn } from "@/shared/lib/cn";
 import { AppSurfaceSheet } from "@/shared/ui";
-import { HotelCardList } from "@/features/chat/ui/hotel-card-list";
 
 interface ChatMessageProps {
   message: ChatMessageItem;
@@ -96,57 +95,57 @@ function MarkdownBubble({
 
   return (
     <div className="max-w-none space-y-0 break-words text-base leading-[1.8] tracking-[0.01em] [line-break:auto] [text-wrap:pretty] [&_*]:break-words">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
-        components={{
-          p: ({ children }) => <p className="my-0 text-base leading-[1.8] [text-wrap:pretty]">{children}</p>,
-          h1: ({ children }) => <h1 className="text-2xl font-bold leading-tight">{children}</h1>,
-          h2: ({ children }) => <h2 className="text-xl font-semibold leading-tight">{children}</h2>,
-          h3: ({ children }) => <h3 className="text-lg font-semibold leading-tight">{children}</h3>,
-          ul: ({ children }) => <ul className="list-disc pl-5">{children}</ul>,
-          ol: ({ children }) => <ol className="list-decimal pl-5">{children}</ol>,
-          li: ({ children }) => <li className="leading-[1.8]">{children}</li>,
-          blockquote: ({ children }) => (
-            <blockquote
-              className={cn(
-                "rounded-[8px] border-l-4 px-3 py-2 italic",
-                isUser ? "border-[#90b9df] bg-[#dceefe]" : "border-[#cfd9dc] bg-[#f6f8f8]",
-              )}
-            >
-              {children}
-            </blockquote>
-          ),
-          a: ({ href, children, className, title, ...rest }) => {
-            // Detect citation chip: text matches [N] pattern
-            const childText = typeof children === "string"
-              ? children
-              : Array.isArray(children) && children.length === 1 && typeof children[0] === "string"
-                ? children[0]
-                : "";
-            const isCitation = /^\[\d+\]$/.test(childText);
-            if (isCitation) {
-              return (
-                <a
-                  href={href}
-                  title={title}
-                  className="citation-chip"
-                  onClick={(e) => {
-                    if (href && /^https?:\/\//i.test(href)) {
-                      e.preventDefault();
-                      openUrl(href);
-                    }
-                  }}
-                >
-                  {children}
-                </a>
-              );
-            }
+      <MarkdownTextSegment content={processedContent} isUser={isUser} openUrl={openUrl} />
+    </div>
+  );
+}
+
+function MarkdownTextSegment({
+  content,
+  isUser,
+  openUrl,
+}: {
+  content: string;
+  isUser: boolean;
+  openUrl: (url: string) => void;
+}) {
+  if (!content) return null;
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
+      components={{
+        p: ({ children }) => <p className="my-0 text-base leading-[1.8] [text-wrap:pretty]">{children}</p>,
+        h1: ({ children }) => <h1 className="text-2xl font-bold leading-tight">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-xl font-semibold leading-tight">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-lg font-semibold leading-tight">{children}</h3>,
+        ul: ({ children }) => <ul className="list-disc pl-5">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal pl-5">{children}</ol>,
+        li: ({ children }) => <li className="leading-[1.8]">{children}</li>,
+        blockquote: ({ children }) => (
+          <blockquote
+            className={cn(
+              "rounded-[8px] border-l-4 px-3 py-2 italic",
+              isUser ? "border-[#90b9df] bg-[#dceefe]" : "border-[#cfd9dc] bg-[#f6f8f8]",
+            )}
+          >
+            {children}
+          </blockquote>
+        ),
+        a: ({ href, children, className, title, ...rest }) => {
+          // Detect citation chip: text matches [N] pattern
+          const childText = typeof children === "string"
+            ? children
+            : Array.isArray(children) && children.length === 1 && typeof children[0] === "string"
+              ? children[0]
+              : "";
+          const isCitation = /^\[\d+\]$/.test(childText);
+          if (isCitation) {
             return (
               <a
                 href={href}
                 title={title}
-                className={cn("font-medium underline underline-offset-2", isUser ? "text-[#0c5577]" : "text-[#177199]")}
+                className="citation-chip"
                 onClick={(e) => {
                   if (href && /^https?:\/\//i.test(href)) {
                     e.preventDefault();
@@ -157,54 +156,69 @@ function MarkdownBubble({
                 {children}
               </a>
             );
-          },
-          hr: () => <div className={cn("my-3 h-px", isUser ? "bg-[#b7d6f1]" : "bg-[#e5eded]")} />,
-          table: ({ children }) => (
-            <div className="overflow-x-auto">
-              <table className="min-w-full border-collapse overflow-hidden rounded-[8px] text-left text-[13px]">{children}</table>
-            </div>
-          ),
-          strong: ({ children }) => <strong className="font-bold text-[#d4704e]">{children}</strong>,
-          thead: ({ children }) => (
-            <thead className={cn(isUser ? "bg-[#d8ebfb]" : "bg-[#f4f7f7]")}>{children}</thead>
-          ),
-          th: ({ children }) => <th className="border border-[#dfe8ea] px-3 py-2 font-semibold">{children}</th>,
-          td: ({ children }) => <td className="border border-[#dfe8ea] px-3 py-2 align-top">{children}</td>,
-          code: ({ inline, className, children, ...props }: ComponentPropsWithoutRef<"code"> & { inline?: boolean }) => {
-            if (inline) {
-              return (
-                <code
-                  {...props}
-                  className={cn(
-                    "rounded-[6px] px-1.5 py-0.5 font-mono text-[0.9em]",
-                    isUser ? "bg-[#d2e8fa] text-[#12394a]" : "bg-[#f2f5f5] text-[#21484f]",
-                    className,
-                  )}
-                >
-                  {children}
-                </code>
-              );
-            }
-
+          }
+          return (
+            <a
+              href={href}
+              title={title}
+              className={cn("font-medium underline underline-offset-2", isUser ? "text-[#0c5577]" : "text-[#177199]")}
+              onClick={(e) => {
+                if (href && /^https?:\/\//i.test(href)) {
+                  e.preventDefault();
+                  openUrl(href);
+                }
+              }}
+            >
+              {children}
+            </a>
+          );
+        },
+        hr: () => <div className={cn("my-3 h-px", isUser ? "bg-[#b7d6f1]" : "bg-[#e5eded]")} />,
+        table: ({ children }) => (
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-collapse overflow-hidden rounded-[8px] text-left text-[13px]">{children}</table>
+          </div>
+        ),
+        strong: ({ children }) => <strong className="font-bold text-[#d4704e]">{children}</strong>,
+        thead: ({ children }) => (
+          <thead className={cn(isUser ? "bg-[#d8ebfb]" : "bg-[#f4f7f7]")}>{children}</thead>
+        ),
+        th: ({ children }) => <th className="border border-[#dfe8ea] px-3 py-2 font-semibold">{children}</th>,
+        td: ({ children }) => <td className="border border-[#dfe8ea] px-3 py-2 align-top">{children}</td>,
+        code: ({ inline, className, children, ...props }: ComponentPropsWithoutRef<"code"> & { inline?: boolean }) => {
+          if (inline) {
             return (
               <code
                 {...props}
                 className={cn(
-                  "block overflow-x-auto rounded-[8px] px-3 py-3 font-mono text-[13px] leading-6",
-                  isUser ? "bg-[#d2e8fa] text-[#12394a]" : "bg-[#f4f7f8] text-[#15363b]",
+                  "rounded-[6px] px-1.5 py-0.5 font-mono text-[0.9em]",
+                  isUser ? "bg-[#d2e8fa] text-[#12394a]" : "bg-[#f2f5f5] text-[#21484f]",
                   className,
                 )}
               >
                 {children}
               </code>
             );
-          },
-          pre: ({ children }) => <pre className="overflow-x-auto">{children}</pre>,
-        }}
-      >
-        {processedContent}
-      </ReactMarkdown>
-    </div>
+          }
+
+          return (
+            <code
+              {...props}
+              className={cn(
+                "block overflow-x-auto rounded-[8px] px-3 py-3 font-mono text-[13px] leading-6",
+                isUser ? "bg-[#d2e8fa] text-[#12394a]" : "bg-[#f4f7f8] text-[#15363b]",
+                className,
+              )}
+            >
+              {children}
+            </code>
+          );
+        },
+        pre: ({ children }) => <pre className="overflow-x-auto">{children}</pre>,
+      }}
+    >
+      {content}
+    </ReactMarkdown>
   );
 }
 
@@ -393,7 +407,14 @@ export function ChatMessage({
           }
           if (group.kind === "text") {
             const textPart = group.parts[0] as Extract<(typeof messageParts)[number], { type: "text" }>;
-            return <MarkdownBubble key={textPart.id} content={textPart.text} isUser={false} annotations={textPart.annotations} />;
+            return (
+              <MarkdownBubble
+                key={textPart.id}
+                content={textPart.text}
+                isUser={false}
+                annotations={textPart.annotations}
+              />
+            );
           }
           // Tool group
           const toolParts = group.parts as ToolPart[];
@@ -401,13 +422,12 @@ export function ChatMessage({
           const extraCount = toolParts.length - 1;
           const hasRunning = toolParts.some((p) => p.status === "running");
           const hasError = toolParts.some((p) => p.status === "error");
-          // 尝试解析卡片数据（遵循主流 Agent 模式：tool_name → 类型路由 → 渲染）
-          const cardData = !hasRunning
-            ? toolParts.reduce<ReturnType<typeof resolveToolCard>>((found, p) => {
-                if (found) return found;
-                return resolveToolCard(p.tool_name, p.output);
-              }, null)
-            : null;
+          // 收集后端在工具返回时已经解析好的结构化卡片，按 card_type 分组渲染。
+          // 工具仍在执行时不展示卡片，避免出现部分数据的过渡状态。
+          const collectedCards: StructuredCard[] = !hasRunning
+            ? toolParts.flatMap((p) => p.cards ?? [])
+            : [];
+          const cardGroups = groupCardsByType(collectedCards);
           return (
             <div key={firstTool.id} className="space-y-1">
               <button
@@ -432,8 +452,21 @@ export function ChatMessage({
                 )}
                 <ChevronRight className="h-4 w-4 opacity-50" />
               </button>
-              {/* 卡片渲染：tool完成后内联展示结构化数据（对标 ChatGPT / Kimi / Doubao） */}
-              {cardData?.type === "hotel_list" && <HotelCardList items={cardData.items} />}
+              {/*
+                内联卡片渲染：tool 完成后展示后端解析出的结构化数据。每种 card_type 注册
+                一个渲染器（见 tool-card-registry.tsx），新增机票/行程/POI 等只需在那里
+                追加映射，不动 chat-message 本身。
+              */}
+              {cardGroups.map((cardGroup) => {
+                const Renderer = getCardListRenderer(cardGroup.cardType);
+                if (!Renderer) return null;
+                return (
+                  <Renderer
+                    key={`${firstTool.id}-${cardGroup.cardType}`}
+                    cards={cardGroup.cards}
+                  />
+                );
+              })}
             </div>
           );
         })}
