@@ -11,6 +11,7 @@ from typing import Any, Callable
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage, message_to_dict
 from pydantic import BaseModel
 
+from app.agent.cards import extract_cards_from_trace
 from app.agent.context import AgentRequestContext
 from app.agent.presentation import _content_to_text, _tool_message_payload
 from app.agent.runtime import AgentRuntimeService
@@ -463,6 +464,12 @@ def _trace_to_tool_part_payload(
     sources = _extract_citation_sources_from_trace(trace)
     if sources:
         existing.sources = sources
+    # Attach structured cards (hotel / flight / itinerary / ...). The card type
+    # is decided by registered extractors in app.agent.cards; the streaming layer
+    # is intentionally domain-agnostic.
+    cards = extract_cards_from_trace(trace)
+    if cards:
+        existing.cards = cards
     return ToolPartPayload(message_id=assistant_message_id, version_id=version_id, part=existing)
 
 

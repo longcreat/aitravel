@@ -60,7 +60,14 @@ def _finalize_ui_parts(
             completed.append(ChatReasoningPart(id="reasoning-1", text=reasoning_text, status="completed"))
         if assistant_text:
             annotations = resolve_annotations_from_text(assistant_text, sources) if sources else []
-            completed.append(ChatTextPart(id="text-1", text=assistant_text, status="completed", annotations=annotations))
+            completed.append(
+                ChatTextPart(
+                    id="text-1",
+                    text=assistant_text,
+                    status="completed",
+                    annotations=annotations,
+                )
+            )
         return completed
 
     finalized: list[ChatMessagePart] = []
@@ -76,7 +83,14 @@ def _finalize_ui_parts(
     has_text = any(part.type == "text" and getattr(part, "text", "") for part in finalized)
     if assistant_text and not has_text:
         annotations = resolve_annotations_from_text(assistant_text, sources) if sources else []
-        finalized.append(ChatTextPart(id="text-1", text=assistant_text, status="completed", annotations=annotations))
+        finalized.append(
+            ChatTextPart(
+                id="text-1",
+                text=assistant_text,
+                status="completed",
+                annotations=annotations,
+            )
+        )
     return finalized
 
 

@@ -190,3 +190,112 @@ def test_extract_tool_events_prefers_tool_artifact_for_payload() -> None:
         "payload": "Exa 高级搜索找到 1 条结果。",
     }
     assert trace.payload == {"kind": "exa_search", "results": [{"title": "Official Guide"}]}
+
+
+class _HotelToolAgent:
+    """Streams an AI tool call followed by a hotel-list ToolMessage artifact.
+
+    Used to verify that ``ChatToolPart.cards`` is populated by the structured
+    card extractor when the underlying tool returns a recognisable payload.
+    """
+
+    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
+        assert stream_mode == ["messages", "updates"]
+        yield {
+            "type": "messages",
+            "data": (
+                AIMessageChunk(
+                    content="",
+                    id="chunk-hotel-1",
+                    tool_call_chunks=[
+                        {
+                            "name": "rollinggo-hotel_searchHotels",
+                            "args": '{"city":"成都"}',
+                            "id": "call-hotel-1",
+                            "index": 0,
+                        }
+                    ],
+                ),
+                {"langgraph_node": "model"},
+            ),
+        }
+        yield {
+            "type": "updates",
+            "data": {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            name="rollinggo-hotel_searchHotels",
+                            content="找到 2 家酒店",
+                            artifact=[
+                                {
+                                    "hotelName": "桔子酒店",
+                                    "address": "东胜街1号",
+                                    "price": {"hasPrice": True, "lowestPrice": 277, "currency": "CNY"},
+                                    "starLevel": 3,
+                                    "bookingUrl": "https://example.com/booking/1",
+                                },
+                                {
+                                    "hotelName": "海友酒店",
+                                    "location": "锦江区",
+                                    "price": {"hasPrice": True, "lowestPrice": 292, "currency": "CNY"},
+                                    "bookingUrl": "https://example.com/booking/2",
+                                },
+                            ],
+                            tool_call_id="call-hotel-1",
+                        )
+                    ]
+                }
+            },
+        }
+
+
+class _HotelToolRuntimeService:
+    def require_runtime(self):
+        return type("Runtime", (), {"agent": _HotelToolAgent()})()
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_run_attaches_structured_cards_to_tool_part(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hotel-list payload should be parsed into typed cards on the tool part."""
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
+
+    service = AgentStreamService(runtime_service=_HotelToolRuntimeService())
+    state = StreamRunState()
+    events: list[tuple[str, dict]] = []
+
+    async for event_name, payload in service.stream_agent_run(
+        thread_id="thread-hotel-cards",
+        agent_input={"messages": ["ignored"]},
+        checkpoint_id=None,
+        model_profile_key="standard",
+        state=state,
+        agent_context=AgentRequestContext(
+            user_id="user-1",
+            thread_id="thread-hotel-cards",
+            locale="zh-CN",
+            model_profile_key="standard",
+            session_meta={},
+        ),
+    ):
+        events.append((event_name, payload))
+
+    # tool.start emits no cards yet (still running); tool.done carries the cards
+    assert [event_name for event_name, _ in events] == ["tool.start", "tool.done"]
+    started, finished = events
+    assert started[1]["part"]["cards"] == []
+    cards = finished[1]["part"]["cards"]
+    assert len(cards) == 2
+    assert cards[0]["card_type"] == "hotel"
+    assert cards[0]["data"]["name"] == "桔子酒店"
+    assert cards[0]["data"]["price"] == 277.0
+    assert cards[0]["source_tool_call_id"] == "call-hotel-1"
+    assert cards[1]["data"]["name"] == "海友酒店"
+
+    tool_part = next(part for part in state.ui_parts if part.type == "tool")
+    assert len(tool_part.cards) == 2  # type: ignore[union-attr]
+    assert tool_part.cards[0].card_type == "hotel"  # type: ignore[union-attr]

@@ -60,6 +60,22 @@ class CitationSource(BaseModel):
     extras: dict[str, Any] = Field(default_factory=dict)
 
 
+class StructuredCard(BaseModel):
+    """工具结果中提取出来的结构化卡片。
+
+    后端把工具原始 payload 解析成类型化数据,前端按 ``card_type`` 注册渲染器
+    即可,不需要再做 schema 探测。新增一种卡片(机票 / 行程 / POI ...)只要
+    在 ``app/agent/cards.py`` 加一个 extractor + 在前端 ``card-renderer-registry``
+    加一个组件,无需修改流式管线。
+    """
+
+    type: Literal["card"] = "card"
+    id: str
+    card_type: str = Field(min_length=1)
+    data: dict[str, Any] = Field(default_factory=dict)
+    source_tool_call_id: str | None = None
+
+
 class ChatTextPart(BaseModel):
     """前端可直接渲染的文本片段。"""
 
@@ -89,6 +105,7 @@ class ChatToolPart(BaseModel):
     input: Any = None
     output: Any = None
     sources: list[CitationSource] = Field(default_factory=list)
+    cards: list[StructuredCard] = Field(default_factory=list)
     status: Literal["running", "success", "error"] = "running"
 
 
