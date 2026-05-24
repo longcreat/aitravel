@@ -20,6 +20,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import remarkCjkFriendly from "remark-cjk-friendly";
 import remarkGfm from "remark-gfm";
 
 const sanitizeSchema = {
@@ -112,7 +113,7 @@ function MarkdownTextSegment({
   if (!content) return null;
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkCjkFriendly]}
       rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
       components={{
         p: ({ children }) => <p className="my-0 text-base leading-[1.8] [text-wrap:pretty]">{children}</p>,
