@@ -1,4 +1,32 @@
-"""Agent 流式执行与事件累计。"""
+"""Agent 流式执行与事件累计。
+
+架构概述
+---------
+LangGraph ``astream(stream_mode=["messages", "updates"])`` 会发出两种事件:
+
+* **messages**: model 节点产生 LLM token 时持续发出 ``AIMessageChunk``。
+  ToolMessage 在 tools 节点内部也会作为一条 messages 事件出现一次,但**它的
+  完整快照在 updates 中已经覆盖**,所以 messages 阶段我们只取
+  ``AIMessageChunk``,用于把 LLM 文字逐字流给前端。
+* **updates**: 每个图节点 *结束* 时发出一次,带该节点的完整状态:
+    - model 节点结束 → 完整 ``AIMessage`` (含完整 ``tool_calls``)
+    - tools 节点结束 → 完整 ``ToolMessage`` (含执行结果)
+
+我们把这两路当成各司其职的通道:
+
+================  ===========================================
+信息类型             来源
+================  ===========================================
+LLM 文字 / 思考     ``messages`` 的 ``AIMessageChunk``
+工具调用决定        ``updates`` 的 ``AIMessage.tool_calls``
+工具执行结果        ``updates`` 的 ``ToolMessage``
+================  ===========================================
+
+工具调用入参以前曾尝试通过 ``messages`` 的 ``tool_call_chunks`` 流式拼装出"入参
+逐字打字"的视觉效果,但那条路径会与 ``updates`` 的同一调用 id 撞车,造成
+``tool.start`` 重复触发、``status`` 被反复重置。新实现**只通过 ``updates`` 触发
+工具事件**,牺牲了入参流式动画(也就 1-2 秒的过渡),换来事件流的线性、可推理。
+"""
 
 from __future__ import annotations
 
@@ -31,6 +59,8 @@ from app.schemas.chat import (
 class StreamRunState:
     """单轮 Agent 流式执行期间的累计状态。"""
 
+    # `messages` 阶段累积所有 AIMessageChunk,主要给 reasoning_content / text_delta 提供
+    # 完整上下文。注意:工具调用判定**不**用它,改由 `updates` 阶段直接给出完整 AIMessage。
     accumulated_chunk: AIMessageChunk | None = None
     streamed_tool_traces: list[ToolTrace] = field(default_factory=list)
     ui_parts: list[ChatMessagePart] = field(default_factory=list)
@@ -61,7 +91,15 @@ class AgentStreamService:
         on_assistant_text_chunk: Callable[[str], None] | None = None,
         agent: Any | None = None,
     ):
-        """执行一次底层 Agent 流并累积结果。"""
+        """执行一次底层 Agent 流并累积结果。
+
+        每个 yield 都是一个 ``(event_name, payload_dict)`` 二元组,直接由上层通过
+        SSE 转发给前端。事件类型固定为:
+
+        * ``part.delta`` — text/reasoning 片段增量,或片段 sealed (status=completed)。
+        * ``tool.start`` — 工具开始执行,带完整入参。
+        * ``tool.done`` — 工具执行结束,带完整 output / sources / cards。
+        """
         runtime = self._runtime_service.require_runtime()
         executor = agent if agent is not None else runtime.agent
 
@@ -85,71 +123,123 @@ class AgentStreamService:
             raw_data = part.get("data")
 
             if part_type == "messages":
-                message_chunk, _stream_meta = _extract_ai_chunk_event(raw_data)
-                if message_chunk is not None:
-                    if state.accumulated_chunk is None:
-                        state.accumulated_chunk = message_chunk
-                    else:
-                        state.accumulated_chunk = state.accumulated_chunk + message_chunk
-                    if on_assistant_text_chunk is not None:
-                        chunk_text = _content_to_text(message_chunk.content)
-                        if chunk_text.strip():
-                            on_assistant_text_chunk(chunk_text)
-                    # 当本 chunk 含工具调用时，先收尾仍在 streaming 的 reasoning/text，
-                    # 避免前端 chip 永远显示 "思考中"。
-                    if _chunk_has_tool_call(message_chunk):
-                        for sealed_payload in _seal_payloads(
-                            _seal_streaming_text_like_parts(state),
-                            assistant_message_id,
-                            version_id,
-                        ):
-                            yield "part.delta", sealed_payload.model_dump()
-                    for tool_payload in _chunk_to_tool_start_payloads(
-                        state,
-                        assistant_message_id=assistant_message_id,
-                        version_id=version_id,
-                        chunk=message_chunk,
-                    ):
-                        yield "tool.start", tool_payload.model_dump()
-                    for delta_payload in _chunk_to_part_deltas(
-                        state,
-                        assistant_message_id=assistant_message_id,
-                        version_id=version_id,
-                        chunk=message_chunk,
-                    ):
-                        yield "part.delta", delta_payload.model_dump()
-
-            if part_type == "updates":
-                for event_type, _, trace in _extract_tool_events(
+                # `messages` 阶段:只处理 model 节点的 LLM token 增量。
+                # 工具调用 chunk(tool_call_chunks)在此被刻意忽略 ——
+                # 工具事件由后面的 `updates` 分支唯一触发,避免双源竞争。
+                async for event_name, payload in self._handle_message_chunk(
                     raw_data,
-                    seen_called=state.seen_called,
-                    seen_returned=state.seen_returned,
+                    state=state,
+                    assistant_message_id=assistant_message_id,
+                    version_id=version_id,
+                    on_assistant_text_chunk=on_assistant_text_chunk,
                 ):
-                    state.streamed_tool_traces.append(trace)
-                    # 工具事件来临前，确保上一段 reasoning/text 已被收尾通知前端
-                    if trace.phase == "called":
-                        for sealed_payload in _seal_payloads(
-                            _seal_streaming_text_like_parts(state),
-                            assistant_message_id,
-                            version_id,
-                        ):
-                            yield "part.delta", sealed_payload.model_dump()
-                    # 工具返回时提取引用来源
-                    if event_type == "tool_returned":
-                        sources = _extract_citation_sources_from_trace(trace)
-                        state.citation_sources.extend(sources)
-                    tool_payload = _trace_to_tool_part_payload(
-                        state,
-                        assistant_message_id=assistant_message_id,
-                        version_id=version_id,
-                        trace=trace,
-                    )
-                    if tool_payload is not None:
-                        yield "tool.start" if trace.phase == "called" else "tool.done", tool_payload.model_dump()
+                    yield event_name, payload
+
+            elif part_type == "updates":
+                # `updates` 阶段:节点结束的快照。AIMessage.tool_calls 触发 tool.start;
+                # ToolMessage 触发 tool.done。
+                async for event_name, payload in self._handle_node_update(
+                    raw_data,
+                    state=state,
+                    assistant_message_id=assistant_message_id,
+                    version_id=version_id,
+                ):
+                    yield event_name, payload
+
+    # ---- handlers ----
+
+    @staticmethod
+    async def _handle_message_chunk(
+        raw_data: Any,
+        *,
+        state: StreamRunState,
+        assistant_message_id: str,
+        version_id: str,
+        on_assistant_text_chunk: Callable[[str], None] | None,
+    ):
+        """处理 ``messages`` 流事件: 仅消费 AIMessageChunk,转化为 part.delta。"""
+        message_chunk, _meta = _extract_ai_chunk_event(raw_data)
+        if message_chunk is None:
+            return  # tools 节点的 ToolMessage 等其他形态在此忽略
+
+        # 累积 chunk(便于后续抽取累积态的 reasoning_content 等)
+        if state.accumulated_chunk is None:
+            state.accumulated_chunk = message_chunk
+        else:
+            state.accumulated_chunk = state.accumulated_chunk + message_chunk
+
+        # TTS 等下游需要拿"用户可见文本"的逐字流
+        if on_assistant_text_chunk is not None:
+            chunk_text = _content_to_text(message_chunk.content)
+            if chunk_text.strip():
+                on_assistant_text_chunk(chunk_text)
+
+        for delta_payload in _chunk_to_part_deltas(
+            state,
+            assistant_message_id=assistant_message_id,
+            version_id=version_id,
+            chunk=message_chunk,
+        ):
+            yield "part.delta", delta_payload.model_dump()
+
+    @staticmethod
+    async def _handle_node_update(
+        raw_data: Any,
+        *,
+        state: StreamRunState,
+        assistant_message_id: str,
+        version_id: str,
+    ):
+        """处理 ``updates`` 流事件: 从节点结束快照中提取工具调用 / 工具返回。"""
+        for event_type, _, trace in _extract_tool_events(
+            raw_data,
+            seen_called=state.seen_called,
+            seen_returned=state.seen_returned,
+        ):
+            state.streamed_tool_traces.append(trace)
+
+            # 工具事件来临前,确保上一段 reasoning/text 已被收尾通知前端,
+            # 防止 chip 永远停在 "思考中"。
+            if trace.phase == "called":
+                for sealed_payload in _seal_payloads(
+                    _seal_streaming_text_like_parts(state),
+                    assistant_message_id,
+                    version_id,
+                ):
+                    yield "part.delta", sealed_payload.model_dump()
+
+            # 工具返回时提取引用来源,挂到对应 tool part 上(也累计供最终文本锚定)。
+            if event_type == "tool_returned":
+                sources = _extract_citation_sources_from_trace(trace)
+                state.citation_sources.extend(sources)
+
+            tool_payload = _trace_to_tool_part_payload(
+                state,
+                assistant_message_id=assistant_message_id,
+                version_id=version_id,
+                trace=trace,
+            )
+            if tool_payload is None:
+                continue
+
+            yield (
+                "tool.start" if trace.phase == "called" else "tool.done",
+                tool_payload.model_dump(),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Event extraction helpers
+# ---------------------------------------------------------------------------
 
 
 def _extract_ai_chunk_event(payload: Any) -> tuple[AIMessageChunk | None, dict[str, Any]]:
-    """从 LangGraph `messages` 事件中提取 `AIMessageChunk` 与元信息。"""
+    """从 LangGraph ``messages`` 事件中提取 ``AIMessageChunk`` 与元信息。
+
+    LangGraph 将 ``messages`` 事件打包为 ``(message, metadata)`` 元组。我们只关心
+    AIMessageChunk(LLM token),其它消息类型(ToolMessage 等)在此忽略 —— 它们
+    的完整快照已经由 ``updates`` 阶段处理。
+    """
     if isinstance(payload, AIMessageChunk):
         return payload, {}
 
@@ -174,7 +264,11 @@ def _extract_tool_events(
     seen_called: set[str],
     seen_returned: set[str],
 ):
-    """从 LangGraph `updates` 中提取工具调用/返回事件并去重。"""
+    """从 LangGraph ``updates`` 中提取工具调用/返回事件并去重。
+
+    去重策略:每个 ``call_id`` 只允许产生一次 ``tool_called`` 和一次 ``tool_returned``。
+    去重 set 由调用方(``StreamRunState``)提供,跨节点共享。
+    """
     for message in _iter_base_messages(payload):
         if isinstance(message, AIMessage):
             for call in message.tool_calls:
@@ -230,6 +324,11 @@ def _iter_base_messages(payload: Any):
                 yield from _iter_base_messages(item)
 
 
+# ---------------------------------------------------------------------------
+# Part state mutation helpers
+# ---------------------------------------------------------------------------
+
+
 def _chunk_to_part_deltas(
     state: StreamRunState,
     *,
@@ -269,109 +368,11 @@ def _chunk_to_part_deltas(
     return payloads
 
 
-def _chunk_to_tool_start_payloads(
-    state: StreamRunState,
-    *,
-    assistant_message_id: str,
-    version_id: str,
-    chunk: AIMessageChunk,
-) -> list[ToolPartPayload]:
-    """从 AI chunk 的 tool call 增量中尽早构建 running 工具 part。
-
-    DashScope / OpenAI 这种 OpenAI 兼容流式接口对 ``tool_call_chunks`` 的发送方式是:
-    第一帧带 ``id`` + ``name`` + 空 ``args``,后续帧只带 ``args`` 增量(``id`` / ``name``
-    都为 None,通过 ``index`` 关联)。所以我们必须读 ``state.accumulated_chunk``
-    才能拿到完整工具调用,**不能只看当前帧的 chunk**——单看当前帧后续增量会被
-    误判为 "无名工具调用" 直接丢弃。
-    """
-    payloads: list[ToolPartPayload] = []
-    source_chunk = state.accumulated_chunk if state.accumulated_chunk is not None else chunk
-    for call in _iter_chunk_tool_calls(source_chunk):
-        tool_name = str(call.get("name") or "").strip()
-        if not tool_name:
-            continue
-
-        tool_call_id = str(call.get("id") or _stable_call_key(tool_name, call.get("index", "")))
-        payload = call.get("args", {})
-        trace = ToolTrace(
-            phase="called",
-            tool_name=tool_name,
-            payload=payload if isinstance(payload, (dict, list, str, int, float, bool)) or payload is None else str(payload),
-            tool_call_id=tool_call_id,
-            result_status=None,
-        )
-        is_first_seen = tool_call_id not in state.seen_called
-        state.seen_called.add(tool_call_id)
-        if is_first_seen:
-            state.streamed_tool_traces.append(trace)
-        tool_payload = _trace_to_tool_part_payload(
-            state,
-            assistant_message_id=assistant_message_id,
-            version_id=version_id,
-            trace=trace,
-        )
-        if tool_payload is not None:
-            payloads.append(tool_payload)
-    return payloads
-
-
-def _chunk_has_tool_call(chunk: AIMessageChunk) -> bool:
-    """判断 AI chunk 里是否携带工具调用增量。"""
-    if getattr(chunk, "tool_calls", None):
-        return True
-    if getattr(chunk, "tool_call_chunks", None):
-        return True
-    return False
-
-
-def _iter_chunk_tool_calls(chunk: AIMessageChunk):
-    """提取 chunk 中当前可识别的工具调用。"""
-    yielded_ids: set[str] = set()
-
-    for call in getattr(chunk, "tool_calls", []) or []:
-        if not isinstance(call, dict):
-            continue
-        tool_name = call.get("name")
-        if not tool_name:
-            continue
-        call_id = str(call.get("id") or _stable_call_key(str(tool_name), call.get("args", {})))
-        yielded_ids.add(call_id)
-        yield {
-            "id": call_id,
-            "name": tool_name,
-            "args": call.get("args", {}),
-            "index": call.get("index"),
-        }
-
-    for call in getattr(chunk, "tool_call_chunks", []) or []:
-        if not isinstance(call, dict):
-            continue
-        tool_name = call.get("name")
-        if not tool_name:
-            continue
-        call_id = str(call.get("id") or _stable_call_key(str(tool_name), call.get("index", "")))
-        if call_id in yielded_ids:
-            continue
-        raw_args = call.get("args", {})
-        args: Any = raw_args
-        if isinstance(raw_args, str):
-            try:
-                args = json.loads(raw_args) if raw_args.strip() else {}
-            except json.JSONDecodeError:
-                args = raw_args
-        yield {
-            "id": call_id,
-            "name": tool_name,
-            "args": args,
-            "index": call.get("index"),
-        }
-
-
 def _seal_streaming_text_like_parts(state: StreamRunState) -> list[ChatTextPart | ChatReasoningPart]:
     """把当前所有仍处于 streaming 状态的 reasoning / text part 标记为 completed。
 
-    用于流式过程中切换到不同类型 part（例如 reasoning → tool）时收尾上一段，
-    避免前端 chip 永远停留在 "思考中"。返回被收尾的 part 列表，便于调用方
+    用于流式过程中切换到不同类型 part(例如 reasoning → tool)时收尾上一段,
+    避免前端 chip 永远停留在 "思考中"。返回被收尾的 part 列表,便于调用方
     向前端发送状态变更事件。
     """
     sealed: list[ChatTextPart | ChatReasoningPart] = []
@@ -387,7 +388,7 @@ def _seal_payloads(
     assistant_message_id: str,
     version_id: str,
 ) -> list[PartDeltaPayload]:
-    """把被收尾的 text-like part 转换为 part.delta 通知（不带文字增量，只更新状态）。"""
+    """把被收尾的 text-like part 转换为 part.delta 通知(不带文字增量,只更新状态)。"""
     return [
         PartDeltaPayload(
             message_id=assistant_message_id,
@@ -409,8 +410,8 @@ def _append_text_like_part(
 ) -> tuple[ChatTextPart | ChatReasoningPart, list[ChatTextPart | ChatReasoningPart]]:
     """追加一段 text / reasoning。
 
-    如果上一段 part 是不同类型，会先把所有仍 streaming 的 text-like part 标记为
-    completed 并返回它们，调用方据此发送收尾 delta。
+    如果上一段 part 是不同类型,会先把所有仍 streaming 的 text-like part 标记为
+    completed 并返回它们,调用方据此发送收尾 delta。
     """
     sealed: list[ChatTextPart | ChatReasoningPart] = []
     last_part = state.ui_parts[-1] if state.ui_parts else None
@@ -438,9 +439,20 @@ def _trace_to_tool_part_payload(
     version_id: str,
     trace: ToolTrace,
 ) -> ToolPartPayload | None:
-    """把工具调用轨迹转换为前端可原地更新的 tool part。"""
+    """把工具调用轨迹转换为前端可原地更新的 tool part。
+
+    每个 ``call_id`` 在 streaming 期间最多走过两次:
+      1. ``called`` —— 创建一个新的 ChatToolPart(status=running),input 来自完整 args dict。
+      2. ``returned`` —— 找到该 part,写入 output / status / sources / cards。
+
+    去重已经在 ``_extract_tool_events`` 完成,这里只做状态写入。
+    """
     tool_call_id = trace.tool_call_id or _stable_call_key(trace.tool_name, trace.payload)
-    existing = next((part for part in state.ui_parts if part.type == "tool" and part.tool_call_id == tool_call_id), None)
+    existing = next(
+        (part for part in state.ui_parts if part.type == "tool" and part.tool_call_id == tool_call_id),
+        None,
+    )
+
     if trace.phase == "called":
         if existing is None:
             existing = ChatToolPart(
@@ -452,24 +464,16 @@ def _trace_to_tool_part_payload(
             )
             state.ui_parts.append(existing)
         else:
+            # 理论上 _extract_tool_events 已去重,不应再次走到这里;为安全起见
+            # 仍刷新 tool_name + input,保留 status running。
             existing.tool_name = trace.tool_name
-            # 只有当新 payload 更"完整"时才覆盖,避免后续不完整的流式增量把已经
-            # 解析好的完整 dict 打回成中间状态字符串。判定标准:
-            #   - 新 payload 是 dict / list / 数字 / bool — 直接接受(它是结构化的)
-            #   - 已有的是 dict/list 而新的是 string/None — 拒绝(说明新值更原始)
-            #   - 其它情况 — 接受(等价或更新更长的字符串)
-            new_payload = trace.payload
-            old_payload = existing.input
-            if isinstance(new_payload, (dict, list)) or isinstance(new_payload, (int, float, bool)):
-                existing.input = new_payload
-            elif isinstance(old_payload, (dict, list)) and not isinstance(new_payload, (dict, list)):
-                pass  # 已有结构化值,不被原始字符串/None 覆盖
-            else:
-                existing.input = new_payload
+            existing.input = trace.payload
             existing.status = "running"
         return ToolPartPayload(message_id=assistant_message_id, version_id=version_id, part=existing)
 
+    # phase == "returned"
     if existing is None:
+        # 同样防御:理论上 called 阶段已经创建过 part,这里兜底。
         existing = ChatToolPart(
             id=f"tool-{tool_call_id}",
             tool_call_id=tool_call_id,
@@ -477,19 +481,21 @@ def _trace_to_tool_part_payload(
             status="success",
         )
         state.ui_parts.append(existing)
+
     existing.tool_name = trace.tool_name
     existing.output = trace.payload
     existing.status = "error" if trace.result_status == "error" else "success"
-    # Attach extracted sources to the tool part
+
     sources = _extract_citation_sources_from_trace(trace)
     if sources:
         existing.sources = sources
-    # Attach structured cards (hotel / flight / itinerary / ...). The card type
-    # is decided by registered extractors in app.agent.cards; the streaming layer
-    # is intentionally domain-agnostic.
+
+    # 结构化卡片(酒店 / 机票 / 行程 / ...) 由 app.agent.cards 注册的 extractor 决定;
+    # streaming 层完全领域无关。
     cards = extract_cards_from_trace(trace)
     if cards:
         existing.cards = cards
+
     return ToolPartPayload(message_id=assistant_message_id, version_id=version_id, part=existing)
 
 
@@ -525,8 +531,13 @@ def _stable_call_key(tool_name: str, args: Any) -> str:
     return f"{tool_name}:{args_repr}"
 
 
+# ---------------------------------------------------------------------------
+# Native serialization (for legacy diagnostic logging only)
+# ---------------------------------------------------------------------------
+
+
 def _serialize_stream_part(part: dict[str, Any]) -> dict[str, Any]:
-    """将 LangGraph `StreamPart` 递归转换为可 JSON 序列化结构。"""
+    """将 LangGraph ``StreamPart`` 递归转换为可 JSON 序列化结构。"""
     return _serialize_native_value(part)
 
 
@@ -555,9 +566,9 @@ def _serialize_native_value(value: Any) -> Any:
 
 _SRC_MARKER_RE = re.compile(r"\[src-(\d+)\]")
 
-# 工具 payload 中可被识别为"引用 URL"的字段名，按优先级排序。
-# 越靠前的字段越具体（如 bookingUrl 是酒店预订深链，比泛 url 更精确）。
-# 添加新领域字段时只需在此追加，不需要修改提取逻辑。
+# 工具 payload 中可被识别为"引用 URL"的字段名,按优先级排序。
+# 越靠前的字段越具体(如 bookingUrl 是酒店预订深链,比泛 url 更精确)。
+# 添加新领域字段时只需在此追加,不需要修改提取逻辑。
 _CITATION_URL_FIELDS: tuple[str, ...] = (
     "bookingUrl",
     "booking_url",
@@ -568,7 +579,7 @@ _CITATION_URL_FIELDS: tuple[str, ...] = (
     "source_url",
 )
 
-# 工具 payload 中可被识别为"引用标题"的字段名，按优先级排序。
+# 工具 payload 中可被识别为"引用标题"的字段名,按优先级排序。
 _CITATION_TITLE_FIELDS: tuple[str, ...] = (
     "title",
     "name",
@@ -589,7 +600,7 @@ def _pick_first_string(item: Mapping[str, Any], keys: Iterable[str]) -> str | No
 
 
 def _coerce_citation_from_dict(item: Mapping[str, Any]) -> CitationSource | None:
-    """从单条 dict 中提取一条引用；没有 URL 则视为不可引用。"""
+    """从单条 dict 中提取一条引用;没有 URL 则视为不可引用。"""
     url = _pick_first_string(item, _CITATION_URL_FIELDS)
     if url is None:
         return None
@@ -598,11 +609,11 @@ def _coerce_citation_from_dict(item: Mapping[str, Any]) -> CitationSource | None
 
 
 def _extract_citation_sources_from_trace(trace: ToolTrace) -> list[CitationSource]:
-    """从工具返回的 payload（artifact）中提取引用来源。
+    """从工具返回的 payload(artifact)中提取引用来源。
 
-    实现是领域无关的：只看 payload 的形状（list[dict] 或 dict 内含 results 数组），
+    实现是领域无关的:只看 payload 的形状(list[dict] 或 dict 内含 results 数组),
     不针对具体工具或具体业务字段做硬编码。具体哪些字段算"URL/标题"由
-    ``_CITATION_URL_FIELDS`` / ``_CITATION_TITLE_FIELDS`` 控制，新增领域只需扩字段表。
+    ``_CITATION_URL_FIELDS`` / ``_CITATION_TITLE_FIELDS`` 控制,新增领域只需扩字段表。
     """
     payload = trace.payload
     if payload is None:
@@ -621,7 +632,7 @@ def _extract_citation_sources_from_trace(trace: ToolTrace) -> list[CitationSourc
 
     sources: list[CitationSource] = []
 
-    # 形状 A：dict 含 "results" 数组（Exa 搜索 / 多数 LLM-style web 工具）
+    # 形状 A:dict 含 "results" 数组(Exa 搜索 / 多数 LLM-style web 工具)
     if isinstance(payload, dict):
         results = payload.get("results")
         if isinstance(results, list):
@@ -633,7 +644,7 @@ def _extract_citation_sources_from_trace(trace: ToolTrace) -> list[CitationSourc
             if sources:
                 return sources
 
-    # 形状 B：直接是 list[dict]（典型如酒店列表 / POI 列表 / 文档列表）
+    # 形状 B:直接是 list[dict](典型如酒店列表 / POI 列表 / 文档列表)
     if isinstance(payload, list):
         for item in payload:
             if isinstance(item, dict):
@@ -649,7 +660,7 @@ def resolve_annotations_from_text(
     text: str,
     sources: list[CitationSource],
 ) -> list[CitationSource]:
-    """扫描文本中的 [src-N] 标记，生成带 start_index/end_index 的 annotations。"""
+    """扫描文本中的 [src-N] 标记,生成带 start_index/end_index 的 annotations。"""
     annotations: list[CitationSource] = []
     for match in _SRC_MARKER_RE.finditer(text):
         idx = int(match.group(1))

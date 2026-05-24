@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 from app.agent.context import AgentRequestContext
 from app.agent.streaming import (
@@ -10,6 +10,22 @@ from app.agent.streaming import (
     _extract_tool_events,
     _serialize_stream_part,
 )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: minimal LangGraph-style stream emitters
+# ---------------------------------------------------------------------------
+#
+# The new streaming architecture treats `messages` purely as a text/reasoning
+# delta channel and relies on `updates` for tool lifecycle events. Each fake
+# agent below mirrors what LangGraph 1.x actually emits in production:
+#
+#   * model node text token  →  ``messages`` AIMessageChunk(content="…")
+#   * model node finishes    →  ``updates`` AIMessage(tool_calls=[...] | content)
+#   * tool node finishes     →  ``updates`` ToolMessage(...)
+#
+# For brevity we elide the per-token tool_call_chunks entirely — they are
+# explicitly ignored by the streaming layer in the new design.
 
 
 class _WhitespaceChunkAgent:
@@ -33,12 +49,17 @@ class _FakeRuntimeService:
         return type("Runtime", (), {"agent": _WhitespaceChunkAgent()})()
 
 
-class _ToolCallChunkAgent:
+class _ToolCallAgent:
+    """Real LangGraph emission shape:
+        1. messages chunks for tool_call_chunks (ignored by streaming layer)
+        2. updates: AIMessage with completed tool_calls (drives tool.start)
+        3. updates: ToolMessage with execution result (drives tool.done)
+    """
+
     async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
-        assert config is not None
-        assert context is not None
         assert stream_mode == ["messages", "updates"]
-        assert version == "v2"
+        # Streaming chunks of the tool call — present in real traffic but
+        # deliberately ignored by the new streaming layer (no tool.start here).
         yield {
             "type": "messages",
             "data": (
@@ -57,6 +78,29 @@ class _ToolCallChunkAgent:
                 {"langgraph_node": "model"},
             ),
         }
+        # model node finishes -> AIMessage with completed tool_calls (this drives tool.start)
+        yield {
+            "type": "updates",
+            "data": {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            id="ai-msg-tool-1",
+                            tool_calls=[
+                                {
+                                    "name": "maps_weather",
+                                    "args": {"city": "杭州"},
+                                    "id": "call-weather-1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    ]
+                }
+            },
+        }
+        # tool node finishes -> ToolMessage (drives tool.done)
         yield {
             "type": "updates",
             "data": {
@@ -75,7 +119,12 @@ class _ToolCallChunkAgent:
 
 class _ToolCallRuntimeService:
     def require_runtime(self):
-        return type("Runtime", (), {"agent": _ToolCallChunkAgent()})()
+        return type("Runtime", (), {"agent": _ToolCallAgent()})()
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 
 def test_serialize_stream_part_converts_langchain_messages() -> None:
@@ -128,7 +177,17 @@ async def test_stream_agent_run_preserves_whitespace_for_tts_chunks(
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_run_emits_tool_start_from_message_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_agent_run_emits_one_tool_start_and_one_tool_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single tool call should produce exactly one tool.start and one tool.done.
+
+    Previously the streaming layer additionally tried to emit tool.start from
+    `messages` tool_call_chunks, which collided with the canonical updates path
+    and produced N+1 spurious tool.start events that kept the UI spinning. The
+    new design routes tool lifecycle exclusively through `updates`, so this
+    test guards against regressions of that bug.
+    """
     monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
     monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
@@ -153,12 +212,16 @@ async def test_stream_agent_run_emits_tool_start_from_message_chunk(monkeypatch:
     ):
         events.append((event_name, payload))
 
-    assert [event_name for event_name, _ in events] == ["tool.start", "tool.done"]
-    assert events[0][1]["part"]["status"] == "running"
-    assert events[0][1]["part"]["tool_name"] == "maps_weather"
-    assert events[0][1]["part"]["input"] == {"city": "杭州"}
-    assert events[1][1]["part"]["status"] == "success"
-    assert events[1][1]["part"]["output"] == "杭州晴，26℃"
+    tool_events = [(name, p) for name, p in events if name.startswith("tool.")]
+    assert [name for name, _ in tool_events] == ["tool.start", "tool.done"]
+
+    start_part = tool_events[0][1]["part"]
+    done_part = tool_events[1][1]["part"]
+    assert start_part["status"] == "running"
+    assert start_part["tool_name"] == "maps_weather"
+    assert start_part["input"] == {"city": "杭州"}  # complete dict from updates, no partial JSON
+    assert done_part["status"] == "success"
+    assert done_part["output"] == "杭州晴，26℃"
     assert [part.type for part in state.ui_parts] == ["tool"]
 
 
@@ -193,32 +256,37 @@ def test_extract_tool_events_prefers_tool_artifact_for_payload() -> None:
 
 
 class _HotelToolAgent:
-    """Streams an AI tool call followed by a hotel-list ToolMessage artifact.
+    """Streams the canonical model→tools update sequence with a hotel artifact.
 
-    Used to verify that ``ChatToolPart.cards`` is populated by the structured
-    card extractor when the underlying tool returns a recognisable payload.
+    Verifies that ``ChatToolPart.cards`` is populated by the structured card
+    extractor when the underlying tool returns a recognisable payload.
     """
 
     async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
         assert stream_mode == ["messages", "updates"]
+        # model node finishes — drives tool.start
         yield {
-            "type": "messages",
-            "data": (
-                AIMessageChunk(
-                    content="",
-                    id="chunk-hotel-1",
-                    tool_call_chunks=[
-                        {
-                            "name": "rollinggo-hotel_searchHotels",
-                            "args": '{"city":"成都"}',
-                            "id": "call-hotel-1",
-                            "index": 0,
-                        }
-                    ],
-                ),
-                {"langgraph_node": "model"},
-            ),
+            "type": "updates",
+            "data": {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            id="ai-msg-hotel-1",
+                            tool_calls=[
+                                {
+                                    "name": "rollinggo-hotel_searchHotels",
+                                    "args": {"city": "成都"},
+                                    "id": "call-hotel-1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    ]
+                }
+            },
         }
+        # tools node finishes — drives tool.done with cards extracted
         yield {
             "type": "updates",
             "data": {
@@ -284,9 +352,10 @@ async def test_stream_agent_run_attaches_structured_cards_to_tool_part(
     ):
         events.append((event_name, payload))
 
-    # tool.start emits no cards yet (still running); tool.done carries the cards
+    # Exactly tool.start then tool.done
     assert [event_name for event_name, _ in events] == ["tool.start", "tool.done"]
     started, finished = events
+    # tool.start carries no cards yet; tool.done carries them
     assert started[1]["part"]["cards"] == []
     cards = finished[1]["part"]["cards"]
     assert len(cards) == 2
