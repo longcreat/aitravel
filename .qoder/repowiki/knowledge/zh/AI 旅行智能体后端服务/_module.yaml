@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: backend
+title: AI 旅行智能体后端服务
+scope:
+    - backend/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend

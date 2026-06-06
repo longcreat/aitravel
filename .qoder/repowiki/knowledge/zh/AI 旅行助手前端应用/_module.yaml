@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: frontend
+title: AI 旅行助手前端应用
+scope:
+    - frontend/
+source_files: []
+depends_on: []
+related_to:
+    - path: backend
