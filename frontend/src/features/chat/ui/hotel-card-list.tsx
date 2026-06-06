@@ -85,16 +85,8 @@ function HotelCardInner({ hotel, onOpenUrl }: { hotel: HotelItem; onOpenUrl: (ur
             className="h-full w-full object-cover"
             loading="lazy"
             referrerPolicy="no-referrer"
-            crossOrigin="anonymous"
             onError={(e) => {
-              const img = e.target as HTMLImageElement;
-              // 第一次失败尝试去掉 crossOrigin 重试
-              if (img.crossOrigin) {
-                img.crossOrigin = null;
-                img.src = hotel.imageUrl!;
-              } else {
-                img.style.display = "none";
-              }
+              (e.target as HTMLImageElement).style.display = "none";
             }}
           />
         </div>

@@ -110,10 +110,7 @@ export function ConnectorsPage() {
   }, [searchParams, setSearchParams, toast, refresh, connectors]);
 
   function handleBack() {
-    if (window.history.length > 1) {
-      navigate(-1);
-      return;
-    }
+    // 始终 replace 到 /profile，避免 navigate(-1) 回退到外部 OAuth 授权页
     navigate("/profile", { replace: true });
   }
 
