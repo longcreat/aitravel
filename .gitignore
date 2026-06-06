@@ -57,6 +57,7 @@ backend/data/speech/
 
 # Local private config
 backend/config/mcp.servers.json
+backend/config/connectors.json
 
 # Python test temp artifacts seen in this repo
 backend/pytest-cache-files-*

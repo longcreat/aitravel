@@ -20,6 +20,9 @@ class ConnectorDefinition(BaseModel):
     mcp_server_url: str
     default_scopes: str | None = None
     enabled: bool = True
+    # 预注册的 OAuth 凭证（用于不支持 DCR 的服务）
+    client_id: str | None = None
+    client_secret: str | None = None
 
 
 class ConnectorState(BaseModel):

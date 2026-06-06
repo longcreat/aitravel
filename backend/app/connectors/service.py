@@ -297,10 +297,24 @@ class ConnectorService:
         server_metadata: AuthorizationServerMetadata,
         client: httpx.AsyncClient,
     ) -> tuple[str, str | None]:
-        """若尚未注册过 OAuth client，则按 RFC 7591 注册一次。"""
+        """若尚未注册过 OAuth client，则按 RFC 7591 注册一次。
+
+        若 connector 定义中预配了 client_id（不支持 DCR 的服务），直接使用预注册凭证。
+        """
         if authorization.client_id:
             secret = decrypt_secret(authorization.client_secret_enc)
             return authorization.client_id, secret
+
+        # 预注册凭证：跳过 DCR，直接用管理员在 connectors.json 里配的 client_id/secret
+        if definition.client_id:
+            secret_enc = encrypt_secret(definition.client_secret) if definition.client_secret else None
+            self._store.update_client_credentials(
+                authorization.id,
+                authorization_server=server_metadata.issuer,
+                client_id=definition.client_id,
+                client_secret_enc=secret_enc,
+            )
+            return definition.client_id, definition.client_secret
 
         client_name = f"{definition.display_name} ({OAUTH_CLIENT_NAME_SUFFIX})"
         registered = await register_client(

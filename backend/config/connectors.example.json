@@ -20,5 +20,15 @@
     "client_uri": "https://aitravel.aigoway.tech",
     "logo_uri": "https://aitravel.aigoway.tech/icon-512.png",
     "enabled": true
+  },
+  "rollinggo": {
+    "display_name": "RollingGo",
+    "description": "连接 RollingGo 旅行平台，让助手帮你查询和预订酒店。",
+    "icon_url": null,
+    "mcp_server_url": "${ROLLINGGO_MCP_SERVER_URL}",
+    "default_scopes": "openid profile email hotel:order:read hotel:order:book hotel:order:cancel",
+    "client_id": "${ROLLINGGO_CLIENT_ID}",
+    "client_secret": "${ROLLINGGO_CLIENT_SECRET}",
+    "enabled": true
   }
 }
