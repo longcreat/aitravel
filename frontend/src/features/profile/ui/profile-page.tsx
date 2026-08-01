@@ -1,7 +1,8 @@
-import { Bell, ChevronRight, Plug, Settings, Shield, SlidersHorizontal, User } from "lucide-react";
-import { useState } from "react";
+import { Bell, ChevronRight, Plug, Settings, Shield, SlidersHorizontal, User, Zap } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/features/auth/model/auth.context";
+import { fetchSubscription } from "@/features/subscription/api/subscription.api";
 import {
   Button,
   ConfirmDialog,
@@ -15,6 +16,25 @@ export function ProfilePage() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [subscriptionSummary, setSubscriptionSummary] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchSubscription()
+      .then((subscription) => {
+        if (cancelled) {
+          return;
+        }
+        const freeLeft = Math.max(0, subscription.daily_free_limit - subscription.free_used);
+        setSubscriptionSummary(`剩余 ${subscription.remain_count + freeLeft} 次`);
+      })
+      .catch(() => {
+        // 加载失败仅显示标题
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function handleConfirmLogout() {
     setLogoutConfirmOpen(false);
@@ -50,6 +70,20 @@ export function ProfilePage() {
         {/* Action List */}
         <section className="flex-1 px-4 pb-8">
           <SettingsGroup>
+            <SettingsRowButton
+              aria-label="open-subscribe"
+              bordered
+              icon={
+                <div className="rounded-full bg-[#f6efe0] p-2 text-[#d4704e]">
+                  <Zap className="h-4 w-4" />
+                </div>
+              }
+              title="订阅与次数"
+              description={subscriptionSummary ?? undefined}
+              trailing={<ChevronRight className="h-4 w-4 text-[#809b9f]" />}
+              onClick={() => navigate("/profile/subscribe")}
+            />
+
             <SettingsRow
               interactive
               bordered

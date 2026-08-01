@@ -574,11 +574,21 @@ function ChatPageInner() {
             <span className="pointer-events-auto text-[20px] font-semibold tracking-[-0.02em] text-[#2c2b28]">WANDER AI</span>
           </div>
 
-          <div className="flex min-w-[76px] justify-end">
+          <div className="flex min-w-fit justify-end">
             {!authReady ? (
               <div className="h-10 w-[76px]" aria-hidden="true" />
             ) : isAuthenticated ? (
-              <Button 
+              <>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="subscribe"
+                  className="mr-1 h-9 rounded-full bg-[#f6efe0] px-3 text-[13px] font-semibold text-[#d4704e] shadow-sm hover:bg-[#f1e6cd]"
+                  onClick={() => navigate("/profile/subscribe")}
+                >
+                  订阅
+                </Button>
+                <Button 
                 size="icon" 
                 variant="ghost" 
                 aria-label="new-session" 
@@ -587,6 +597,7 @@ function ChatPageInner() {
               >
                 <Plus className="h-5 w-5 text-mint" />
               </Button>
+              </>
             ) : (
               <Button
                 type="button"
