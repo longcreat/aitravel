@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_agent_service, get_current_user
+from app.api.deps import get_agent_service, get_current_user, get_payment_service
+from app.auth.store import AuthSQLiteStore
 from app.main import create_app
+from app.payment.service import PaymentService
 from app.schemas.auth import AuthUser
 from app.schemas.chat import (
     AssistantVersion,
@@ -323,14 +325,10 @@ def test_chat_stream_api_and_sessions_api(monkeypatch: pytest.MonkeyPatch, tmp_p
     fake_service = _FakeService()
     monkeypatch.setattr("app.main.get_agent_service", lambda: fake_service)
     app = create_app()
+    current_user = AuthSQLiteStore(tmp_path / "chat.db").create_user("demo@example.com")
     app.dependency_overrides[get_agent_service] = lambda: fake_service
-    app.dependency_overrides[get_current_user] = lambda: AuthUser(
-        id="user-1",
-        email="demo@example.com",
-        nickname="demo",
-        created_at="2026-04-05T00:00:00Z",
-        updated_at="2026-04-05T00:00:00Z",
-    )
+    app.dependency_overrides[get_current_user] = lambda: current_user
+    app.dependency_overrides[get_payment_service] = lambda: PaymentService(sqlite_db_path=tmp_path / "chat.db")
 
     with TestClient(app) as client:
         health = client.get("/api/health")
@@ -485,14 +483,10 @@ def test_chat_stream_hides_internal_exception_details(monkeypatch: pytest.Monkey
     fake_service = _CrashedService()
     monkeypatch.setattr("app.main.get_agent_service", lambda: fake_service)
     app = create_app()
+    current_user = AuthSQLiteStore(tmp_path / "chat.db").create_user("demo@example.com")
     app.dependency_overrides[get_agent_service] = lambda: fake_service
-    app.dependency_overrides[get_current_user] = lambda: AuthUser(
-        id="user-1",
-        email="demo@example.com",
-        nickname="demo",
-        created_at="2026-04-05T00:00:00Z",
-        updated_at="2026-04-05T00:00:00Z",
-    )
+    app.dependency_overrides[get_current_user] = lambda: current_user
+    app.dependency_overrides[get_payment_service] = lambda: PaymentService(sqlite_db_path=tmp_path / "chat.db")
 
     with TestClient(app) as client:
         response = client.post(

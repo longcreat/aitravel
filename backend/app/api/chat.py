@@ -14,7 +14,8 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from app.agent.service import TravelAgentService
-from app.api.deps import get_agent_service, get_current_user
+from app.api.deps import get_agent_service, get_current_user, get_payment_service
+from app.payment.service import PaymentService, QuotaExhaustedError
 from app.schemas.auth import AuthUser
 from app.schemas.chat import ChatInvokeRequest, ListChatModelProfilesResponse, StreamErrorPayload
 
@@ -43,8 +44,18 @@ async def stream_chat(
     payload: ChatInvokeRequest,
     service: TravelAgentService = Depends(get_agent_service),
     current_user: AuthUser = Depends(get_current_user),
+    payment_service: PaymentService = Depends(get_payment_service),
 ) -> StreamingResponse:
-    """以 SSE 方式返回 LangGraph 原生流事件。"""
+    """以 SSE 方式返回 LangGraph 原生流事件；每次对话消费 1 次额度。"""
+
+    try:
+        payment_service.consume(current_user.id)
+    except QuotaExhaustedError as exc:
+        return StreamingResponse(
+            iter([_encode_sse("error", StreamErrorPayload(message=str(exc)).model_dump())]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
 
     async def _stream() -> AsyncIterator[bytes]:
         try:
