@@ -69,21 +69,28 @@ class PaymentService:
         return str(order["amount"]) if order is not None else None
 
     def consume(self, user_id: str) -> tuple[int, int]:
-        """消费 1 次；额度不足抛 QuotaExhaustedError。"""
+        """消费 1 次；额度不足抛 QuotaExhaustedError。
+
+        返回 (更新后的 free_used, 更新后的 remain_count)。
+        """
         ok, free_used, remain = self._store.consume_quota(user_id, _today_utc())
         if not ok:
             raise QuotaExhaustedError("今日免费次数已用完，请订阅次数包后继续")
         return free_used, remain
 
     def handle_notify(self, data: dict[str, str], sign: str | None) -> bool:
-        """notify 业务校验：验签 → app_id → 金额 → 幂等 → 置 PAID + 加次数。"""
+        """notify 业务校验：验签 → app_id → 订单 → 金额 → 幂等 → 置 PAID + 加次数。"""
         if not sign:
             return False
         if not self._verify_sign(data, sign):
             _LOGGER.warning("Invalid alipay signature for trade %s", data.get("out_trade_no"))
             return False
 
-        from app.api.alipay_payment import EXPECTED_ALIPAY_APP_ID
+        try:
+            from app.api.alipay_payment import EXPECTED_ALIPAY_APP_ID
+        except ImportError:
+            _LOGGER.warning("alipay module not ready, rejecting notify (app_id check)")
+            return False
 
         if data.get("app_id") != EXPECTED_ALIPAY_APP_ID:
             _LOGGER.warning("Unexpected app_id in notify: %s", data.get("app_id"))
@@ -101,12 +108,14 @@ class PaymentService:
             _LOGGER.warning("Amount mismatch for %s", out_trade_no)
             return False
 
-        if self._store.mark_order_paid(out_trade_no):
-            self._store.grant_quota(str(order["user_id"]), int(order["quota"]))
+        if self._store.mark_paid_and_grant(out_trade_no, int(order["quota"])):
             _LOGGER.info("Payment success and quota granted: %s", out_trade_no)
         return True
 
     def _verify_sign(self, data: dict[str, str], sign: str) -> bool:
-        from app.api.alipay_payment import verify_alipay_signature
-
+        try:
+            from app.api.alipay_payment import verify_alipay_signature
+        except ImportError:
+            _LOGGER.exception("alipay module not ready, rejecting notify")
+            return False
         return verify_alipay_signature(data, sign)

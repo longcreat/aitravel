@@ -1,12 +1,14 @@
 """支付服务测试（不触网，验签与加次数逻辑）。"""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
 from app.payment.service import PACKAGES, QuotaExhaustedError, PaymentService
+from app.payment.store import DAILY_FREE_LIMIT
 
 INVALID_APP_ID = "9021000165642883"
 
@@ -34,6 +36,12 @@ class FakeStore:
         self.paid_calls.append(out_trade_no)
         return True
 
+    def mark_paid_and_grant(self, out_trade_no: str, count: int, paid_at: str | None = None) -> bool:
+        if not self.mark_order_paid(out_trade_no, paid_at):
+            return False
+        self.grant_quota(str(self.orders[out_trade_no]["user_id"]), count)
+        return True
+
     def get_quota(self, user_id: str) -> dict | None:
         return self.quota.setdefault(user_id, {"remain_count": 0, "free_date": "", "free_used": 0})
 
@@ -42,7 +50,7 @@ class FakeStore:
 
     def consume_quota(self, user_id: str, today: str) -> tuple[bool, int, int]:
         row = self.get_quota(user_id)
-        if row["free_used"] < 10:
+        if row["free_used"] < DAILY_FREE_LIMIT:
             row["free_used"] += 1
             return True, row["free_used"], row["remain_count"]
         if row["remain_count"] > 0:
@@ -84,6 +92,26 @@ def test_consume_raises_when_exhausted(service: PaymentService) -> None:
         service.consume("user-1")
 
 
+def test_consume_returns_progression(service: PaymentService) -> None:
+    for expected_free_used in range(1, DAILY_FREE_LIMIT + 1):
+        free_used, remain = service.consume("user-1")
+        assert free_used == expected_free_used
+        assert remain == 0
+
+
+def test_get_subscription_free_reset(service: PaymentService) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    service._store.quota["user-1"] = {"remain_count": 0, "free_date": today, "free_used": 3}
+    subscription = service.get_subscription("user-1")
+    assert subscription["free_used"] == 3
+
+    service._store.quota["user-1"] = {"remain_count": 5, "free_date": yesterday, "free_used": 9}
+    subscription = service.get_subscription("user-1")
+    assert subscription["free_used"] == 0
+    assert subscription["remain_count"] == 5
+
+
 def test_handle_notify_invalid_signature_fails(service: PaymentService) -> None:
     data = {"out_trade_no": "n1", "total_amount": "9.90", "trade_status": "TRADE_SUCCESS", "app_id": INVALID_APP_ID}
     assert service.handle_notify(data, "bad-sign") is False
@@ -108,6 +136,18 @@ def test_handle_notify_amount_mismatch_fails(service: PaymentService) -> None:
     data = {
         "out_trade_no": out_trade_no,
         "total_amount": "0.01",
+        "trade_status": "TRADE_SUCCESS",
+        "app_id": INVALID_APP_ID,
+    }
+    assert service.handle_notify(data, "sign") is False
+    assert service._store.paid_calls == []
+    assert service._store.grant_calls == []
+
+
+def test_handle_notify_fails_closed_when_module_missing(service: PaymentService) -> None:
+    data = {
+        "out_trade_no": "n1",
+        "total_amount": "9.90",
         "trade_status": "TRADE_SUCCESS",
         "app_id": INVALID_APP_ID,
     }

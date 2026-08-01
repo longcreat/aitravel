@@ -88,6 +88,36 @@ class PaymentSQLiteStore:
             )
             return cursor.rowcount == 1
 
+    def mark_paid_and_grant(self, out_trade_no: str, count: int, paid_at: str | None = None) -> bool:
+        """原子完成：PENDING→PAID 并给 user 加次数；失败/已处理返回 False。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM payment_orders WHERE out_trade_no = ?",
+                (out_trade_no,),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = conn.execute(
+                """
+                UPDATE payment_orders
+                SET status = 'PAID', paid_at = ?
+                WHERE out_trade_no = ? AND status = 'PENDING'
+                """,
+                (paid_at or _utc_now_iso(), out_trade_no),
+            )
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                """
+                INSERT INTO user_quota (user_id, remain_count, free_date, free_used)
+                VALUES (?, ?, '', 0)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    remain_count = remain_count + excluded.remain_count
+                """,
+                (str(row["user_id"]), count),
+            )
+            return True
+
     # ---- 额度 ----
 
     def _ensure_quota_row(self, conn: sqlite3.Connection, user_id: str) -> None:

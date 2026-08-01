@@ -82,6 +82,37 @@ def test_grant_quota(store: PaymentSQLiteStore, user_id: str) -> None:
     assert row["remain_count"] == 150
 
 
+def test_mark_paid_and_grant(store: PaymentSQLiteStore, user_id: str) -> None:
+    store.create_order("202608010004", user_id, "trial", "9.90", 50)
+    changed = store.mark_paid_and_grant("202608010004", 50, "2026-08-01T10:00:00")
+    assert changed is True
+    order = store.get_order("202608010004")
+    assert order is not None
+    assert order["status"] == "PAID"
+    row = store.get_quota(user_id)
+    assert row is not None
+    assert row["remain_count"] == 50
+    # 幂等：重复调用返回 False 且只加一次
+    changed_again = store.mark_paid_and_grant("202608010004", 50, "2026-08-01T10:00:00")
+    assert changed_again is False
+    row = store.get_quota(user_id)
+    assert row is not None
+    assert row["remain_count"] == 50
+
+
+def test_mark_paid_and_grant_nonexistent_order(store: PaymentSQLiteStore) -> None:
+    assert store.mark_paid_and_grant("no-such-order", 50) is False
+
+
+def test_mark_paid_and_grant_accumulates_quota(store: PaymentSQLiteStore, user_id: str) -> None:
+    store.grant_quota(user_id, 10)
+    store.create_order("202608010005", user_id, "standard", "19.90", 150)
+    assert store.mark_paid_and_grant("202608010005", 150) is True
+    row = store.get_quota(user_id)
+    assert row is not None
+    assert row["remain_count"] == 160
+
+
 def test_consume_quota_free_first(store: PaymentSQLiteStore, user_id: str) -> None:
     # 新用户当天第一次消费走免费额度
     ok, free_used, remain = store.consume_quota(user_id, "2026-08-01")
