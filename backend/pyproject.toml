@@ -21,6 +21,8 @@ dependencies = [
   "langchain-openai>=1.1.14,<2.0.0",
   "langchain-qwq>=0.3.5,<0.4.0",
   "langsmith>=0.7.25,<1.0.0",
+  # langchain-mcp-adapters 需要 mcp<1.28 的 RequestContext；Docker 无锁解析，必须显式约束
+  "mcp>=1.27.0,<1.28",
   "cryptography>=43.0.0,<50.0.0",
   "alipay-sdk-python>=3.7.1160",
 ]
