@@ -21,45 +21,12 @@ class PaymentSQLiteStore:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """确保两张表存在（生产环境由 migration 007 建表，此处幂等补建）。
-
-        注意：此处不声明外键，测试使用临时 DB 与任意 user_id；
-        生产库的表由 migration 007 创建，外键约束仍生效。
-        """
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS payment_orders (
-                  out_trade_no TEXT PRIMARY KEY,
-                  user_id TEXT NOT NULL,
-                  package_id TEXT NOT NULL,
-                  amount TEXT NOT NULL,
-                  quota INTEGER NOT NULL,
-                  status TEXT NOT NULL DEFAULT 'PENDING',
-                  created_at TEXT NOT NULL,
-                  paid_at TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_quota (
-                  user_id TEXT PRIMARY KEY,
-                  remain_count INTEGER NOT NULL DEFAULT 0,
-                  free_date TEXT NOT NULL DEFAULT '',
-                  free_used INTEGER NOT NULL DEFAULT 0
-                )
-                """
-            )
-            conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     @contextmanager
@@ -105,23 +72,21 @@ class PaymentSQLiteStore:
         return dict(row)
 
     def mark_order_paid(self, out_trade_no: str, paid_at: str | None = None) -> bool:
-        """将订单置为 PAID；已 PAID 时返回 False（幂等）。"""
+        """将订单置为 PAID；非 PENDING 状态或不存在时返回 False。
+
+        单条条件 UPDATE 保证原子性：并发回调下只有一个成功，
+        避免重复发放额度。已 PAID / CLOSED / REFUNDED 均不会被翻转。
+        """
         with self._connection() as conn:
-            row = conn.execute(
-                "SELECT status FROM payment_orders WHERE out_trade_no = ?",
-                (out_trade_no,),
-            ).fetchone()
-            if row is None or str(row["status"]) == "PAID":
-                return False
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE payment_orders
                 SET status = 'PAID', paid_at = ?
-                WHERE out_trade_no = ?
+                WHERE out_trade_no = ? AND status = 'PENDING'
                 """,
                 (paid_at or _utc_now_iso(), out_trade_no),
             )
-            return True
+            return cursor.rowcount == 1
 
     # ---- 额度 ----
 
