@@ -74,3 +74,11 @@ frontend/vite.config.d.ts
 
 # Deploy scripts (local only)
 deploy/
+
+# Agent skills (installed copies, not project source)
+.agents/skills/
+.claude/skills/
+.claude/settings.local.json
+
+# Alipay sandbox credentials (contains private keys)
+.alipay-sandbox.json
