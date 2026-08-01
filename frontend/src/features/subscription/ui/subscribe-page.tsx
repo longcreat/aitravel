@@ -117,7 +117,7 @@ export function SubscribePage() {
                 <p className="mt-2 text-sm text-muted-foreground">{pkg.quota} 次 AI 对话额度，长期有效</p>
                 <Button
                   className="mt-4 w-full rounded-full"
-                  disabled={payingPackage === pkg.id}
+                  disabled={payingPackage !== null}
                   onClick={() => void handleBuy(pkg.id)}
                 >
                   {payingPackage === pkg.id ? "跳转收银台..." : "立即购买"}
