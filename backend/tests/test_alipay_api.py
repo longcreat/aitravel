@@ -133,7 +133,7 @@ def test_pay_authed_valid_package(client: TestClient) -> None:
     assert payload["out_trade_no"]
     assert payload["package"] == "trial"
     assert payload["total_amount"] == "9.90"
-    assert payload["subject"] == "WANDER AI 对话次数包"
+    assert payload["subject"] == "WANDER AI Quota Pack"
     assert payload["sign"]
     assert payload["method"] == "alipay.trade.page.pay"
     assert payload["sign_type"] == "RSA2"

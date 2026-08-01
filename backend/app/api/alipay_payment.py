@@ -102,7 +102,7 @@ async def create_payment(
     _require_alipay_config()
     out_trade_no = payment_service.create_payment_order(user_id=current_user.id, package_id=req.package_id)
     amount = payment_service.get_order_amount(out_trade_no)
-    subject = f"{BRAND_NAME} 对话次数包"
+    subject = f"{BRAND_NAME} Quota Pack"
     notify_url = _env("ALIPAY_NOTIFY_URL", "https://aitravel.aigoway.tech/api/alipay/notify")
     return_url = _env("ALIPAY_RETURN_URL", "https://aitravel.aigoway.tech/api/alipay/return")
     biz_content = json.dumps(

@@ -29,6 +29,7 @@ export function buildAlipayCheckoutForm(payment: PaymentOrderResponse): HTMLForm
   const form = document.createElement("form");
   form.method = "POST";
   form.action = payment.gateway_url;
+  form.acceptCharset = "UTF-8";
   form.style.display = "none";
 
   const fields: Array<[string, string]> = [
