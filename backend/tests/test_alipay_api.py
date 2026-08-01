@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from alipay.aop.api.util.SignatureUtils import get_sign_content, verify_with_rsa
+from alipay.aop.api.util.SignatureUtils import get_sign_content, sign_with_rsa2, verify_with_rsa
 
 from app.api import deps
 from app.main import create_app
@@ -32,15 +32,41 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _register_and_login(client: TestClient) -> str:
-    send = client.post("/api/auth/send-code", json={"email": "demo@example.com", "purpose": "register"})
+def _register_and_login(client: TestClient, email: str = "demo@example.com") -> str:
+    send = client.post("/api/auth/send-code", json={"email": email, "purpose": "register"})
     assert send.status_code == 200
     verify = client.post(
         "/api/auth/verify-code",
-        json={"email": "demo@example.com", "code": "123456", "purpose": "register"},
+        json={"email": email, "code": "123456", "purpose": "register"},
     )
     assert verify.status_code == 200
     return verify.json()["access_token"]
+
+
+def _sandbox_config() -> dict:
+    return json.loads(_SANDBOX_CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def _sign_notify(params: dict[str, str], private_key: str) -> str:
+    return sign_with_rsa2(private_key, get_sign_content(params), "utf-8")
+
+
+def _create_paid_order(monkeypatch: pytest.MonkeyPatch, client: TestClient, token: str) -> str:
+    """用沙箱应用私钥签名一个 TRADE_SUCCESS notify 将订单置为 PAID。"""
+    pay = client.post("/api/alipay/pay", json={"package_id": "trial"}, headers=_auth(token))
+    assert pay.status_code == 200
+    out_trade_no = pay.json()["out_trade_no"]
+    sandbox_config = _sandbox_config()
+    monkeypatch.setenv("ALIPAY_PUBLIC_KEY", sandbox_config["appPublicKey"])
+    params = {
+        "app_id": sandbox_config["appId"],
+        "out_trade_no": out_trade_no,
+        "total_amount": "9.90",
+        "trade_status": "TRADE_SUCCESS",
+    }
+    notify = client.post("/api/alipay/notify", data={**params, "sign": _sign_notify(params, sandbox_config["appPrivatePkcsKey"])})
+    assert notify.text == "success"
+    return out_trade_no
 
 
 @pytest.fixture()
@@ -167,12 +193,83 @@ def test_notify_garbage_sign_returns_failure(client: TestClient) -> None:
     assert response.text == "failure"
 
 
-def test_return_echoes_out_trade_no(client: TestClient) -> None:
-    response = client.get("/api/alipay/return", params={"out_trade_no": "abc123"})
+def test_notify_success_grants_quota_idempotent(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    token = _register_and_login(client)
+    pay = client.post("/api/alipay/pay", json={"package_id": "trial"}, headers=_auth(token))
+    assert pay.status_code == 200
+    out_trade_no = pay.json()["out_trade_no"]
+
+    sandbox_config = _sandbox_config()
+    monkeypatch.setenv("ALIPAY_PUBLIC_KEY", sandbox_config["appPublicKey"])
+    params = {
+        "app_id": sandbox_config["appId"],
+        "out_trade_no": out_trade_no,
+        "total_amount": "9.90",
+        "trade_status": "TRADE_SUCCESS",
+    }
+    sign = _sign_notify(params, sandbox_config["appPrivatePkcsKey"])
+
+    notify = client.post("/api/alipay/notify", data={**params, "sign": sign})
+    assert notify.status_code == 200
+    assert notify.headers["content-type"].startswith("text/plain")
+    assert notify.text == "success"
+
+    subscription = client.get("/api/alipay/subscription", headers=_auth(token)).json()
+    assert subscription["remain_count"] == 50
+
+    second = client.post("/api/alipay/notify", data={**params, "sign": sign})
+    assert second.text == "success"
+    subscription = client.get("/api/alipay/subscription", headers=_auth(token)).json()
+    assert subscription["remain_count"] == 50
+
+
+def test_query_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/alipay/query", json={"out_trade_no": "x"})
+    assert response.status_code == 401
+
+
+def test_query_unknown_order_404(client: TestClient) -> None:
+    token = _register_and_login(client)
+    response = client.post("/api/alipay/query", json={"out_trade_no": "no-such-order"}, headers=_auth(token))
+    assert response.status_code == 404
+
+
+def test_query_other_users_order_404(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    token_a = _register_and_login(client)
+    out_trade_no = _create_paid_order(monkeypatch, client, token_a)
+    token_b = _register_and_login(client, email="other@example.com")
+    response = client.post("/api/alipay/query", json={"out_trade_no": out_trade_no}, headers=_auth(token_b))
+    assert response.status_code == 404
+
+
+def test_query_own_paid_order(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    token = _register_and_login(client)
+    out_trade_no = _create_paid_order(monkeypatch, client, token)
+    response = client.post("/api/alipay/query", json={"out_trade_no": out_trade_no}, headers=_auth(token))
     assert response.status_code == 200
     payload = response.json()
-    assert payload["out_trade_no"] == "abc123"
-    assert payload["paid"] is False
+    assert payload["out_trade_no"] == out_trade_no
+    assert payload["order_status"] == "PAID"
+    assert payload["paid"] is True
+    assert payload["remain_count"] == 50
+
+
+def test_pay_uses_env_app_id_when_set(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    monkeypatch.setenv("ALIPAY_APP_ID", "9999999999999999")
+    token = _register_and_login(client)
+    response = client.post("/api/alipay/pay", json={"package_id": "trial"}, headers=_auth(token))
+    assert response.status_code == 200
+    assert response.json()["app_id"] == "9999999999999999"
+
+
+def test_return_redirects_to_result_page(client: TestClient) -> None:
+    response = client.get(
+        "/api/alipay/return",
+        params={"out_trade_no": "abc123"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "/profile/subscribe/result?out_trade_no=abc123"
 
 
 def test_old_alipay_prefix_removed(client: TestClient) -> None:

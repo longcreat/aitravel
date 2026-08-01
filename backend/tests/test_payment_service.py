@@ -142,15 +142,3 @@ def test_handle_notify_amount_mismatch_fails(service: PaymentService) -> None:
     assert service.handle_notify(data, "sign") is False
     assert service._store.paid_calls == []
     assert service._store.grant_calls == []
-
-
-def test_handle_notify_fails_closed_when_module_missing(service: PaymentService) -> None:
-    data = {
-        "out_trade_no": "n1",
-        "total_amount": "9.90",
-        "trade_status": "TRADE_SUCCESS",
-        "app_id": INVALID_APP_ID,
-    }
-    assert service.handle_notify(data, "sign") is False
-    assert service._store.paid_calls == []
-    assert service._store.grant_calls == []

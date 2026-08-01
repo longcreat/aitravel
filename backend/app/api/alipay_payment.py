@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 
 from alipay.aop.api.util.SignatureUtils import get_sign_content, sign_with_rsa2, verify_with_rsa
@@ -50,7 +50,9 @@ def _sandbox_value(key: str) -> str:
     return str(value) if value else ""
 
 
-EXPECTED_ALIPAY_APP_ID = _env("ALIPAY_APP_ID", _sandbox_value("appId"))
+def expected_alipay_app_id() -> str:
+    """返回支付宝 app_id：优先环境变量，缺省回退沙箱配置（请求时求值）。"""
+    return _env("ALIPAY_APP_ID", _sandbox_value("appId"))
 
 
 def _require_alipay_config() -> None:
@@ -58,7 +60,7 @@ def _require_alipay_config() -> None:
     missing = [
         name
         for name, value in (
-            ("ALIPAY_APP_ID", EXPECTED_ALIPAY_APP_ID),
+            ("ALIPAY_APP_ID", expected_alipay_app_id()),
             ("ALIPAY_PRIVATE_KEY", _env("ALIPAY_PRIVATE_KEY", _sandbox_value("appPrivatePkcsKey"))),
             ("ALIPAY_PUBLIC_KEY", _env("ALIPAY_PUBLIC_KEY", _sandbox_value("alipayPublicKey"))),
         )
@@ -113,7 +115,7 @@ async def create_payment(
         ensure_ascii=False,
     )
     params = {
-        "app_id": EXPECTED_ALIPAY_APP_ID,
+        "app_id": expected_alipay_app_id(),
         "method": "alipay.trade.page.pay",
         "charset": "utf-8",
         "sign_type": "RSA2",
@@ -157,7 +159,7 @@ async def query_payment(
 ) -> dict[str, Any]:
     """查询本地订单状态（支付结果页轮询用）。"""
     order = payment_service.get_order(req.out_trade_no)
-    if order is None:
+    if order is None or str(order["user_id"]) != str(current_user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="订单不存在")
     order_status = str(order["status"])
     return {
@@ -186,10 +188,6 @@ async def get_subscription(
 
 
 @router.get("/return")
-async def alipay_return(
-    out_trade_no: str,
-    payment_service: PaymentService = Depends(get_payment_service),
-) -> dict[str, Any]:
-    """支付宝支付完成后的浏览器跳回；仅回读订单号，状态以 notify/query 为准。"""
-    order = payment_service.get_order(out_trade_no)
-    return {"out_trade_no": out_trade_no, "paid": order is not None and str(order["status"]) == "PAID"}
+async def alipay_return(out_trade_no: str = "") -> RedirectResponse:
+    """支付宝支付完成后的浏览器跳回；重定向到前端结果页，状态以 notify/query 为准。"""
+    return RedirectResponse(url=f"/profile/subscribe/result?out_trade_no={out_trade_no}", status_code=302)

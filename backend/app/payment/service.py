@@ -91,12 +91,12 @@ class PaymentService:
             return False
 
         try:
-            from app.api.alipay_payment import EXPECTED_ALIPAY_APP_ID
+            from app.api.alipay_payment import expected_alipay_app_id
         except ImportError:
             _LOGGER.warning("alipay module not ready, rejecting notify (app_id check)")
             return False
 
-        if data.get("app_id") != EXPECTED_ALIPAY_APP_ID:
+        if data.get("app_id") != expected_alipay_app_id():
             _LOGGER.warning("Unexpected app_id in notify: %s", data.get("app_id"))
             return False
 
