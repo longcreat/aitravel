@@ -18,6 +18,7 @@ from app.db.bootstrap import bootstrap_sqlite_database
 from app.api.health import router as health_router
 from app.api.sessions import router as sessions_router
 from app.api.speech import router as speech_router
+from app.api.alipay_payment import router as alipay_router
 
 
 @asynccontextmanager
@@ -49,5 +50,6 @@ def create_app() -> FastAPI:
     app.include_router(connectors_router)
     app.include_router(sessions_router)
     app.include_router(speech_router)
+    app.include_router(alipay_router)
 
     return app

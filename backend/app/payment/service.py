@@ -68,6 +68,10 @@ class PaymentService:
         order = self._store.get_order(out_trade_no)
         return str(order["amount"]) if order is not None else None
 
+    def get_order(self, out_trade_no: str) -> dict | None:
+        """返回订单信息（供支付结果查询），订单不存在返回 None。"""
+        return self._store.get_order(out_trade_no)
+
     def consume(self, user_id: str) -> tuple[int, int]:
         """消费 1 次；额度不足抛 QuotaExhaustedError。
 

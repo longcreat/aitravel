@@ -46,6 +46,15 @@ def get_connector_service() -> ConnectorService:
     return ConnectorService(sqlite_db_path=sqlite_path)
 
 
+@lru_cache
+def get_payment_service() -> PaymentService:
+    """返回全局单例 `PaymentService`。"""
+    from app.payment.service import PaymentService
+
+    sqlite_path = bootstrap_sqlite_database()
+    return PaymentService(sqlite_db_path=sqlite_path)
+
+
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
