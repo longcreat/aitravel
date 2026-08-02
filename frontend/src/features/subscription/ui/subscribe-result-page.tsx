@@ -16,6 +16,7 @@ export function SubscribeResultPage() {
   const outTradeNo = searchParams.get("out_trade_no") ?? "";
   const [status, setStatus] = useState<ResultStatus>(outTradeNo ? "loading" : "missing");
   const [remainCount, setRemainCount] = useState(0);
+  const [tradeNo, setTradeNo] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
   const runIdRef = useRef(0);
 
@@ -32,6 +33,7 @@ export function SubscribeResultPage() {
     const runId = runIdRef.current;
     setStatus("loading");
     setRemainCount(0);
+    setTradeNo(null);
     let attempts = 0;
 
     const tick = async () => {
@@ -43,6 +45,7 @@ export function SubscribeResultPage() {
         }
         if (order.paid) {
           setRemainCount(order.remain_count);
+          setTradeNo(order.trade_no);
           setStatus("paid");
           return;
         }
@@ -102,6 +105,11 @@ export function SubscribeResultPage() {
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
               已到账，可用次数 <span className="font-semibold text-ink">{remainCount}</span> 次
             </p>
+            {tradeNo && (
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                支付宝交易号 <span className="font-mono">{tradeNo}</span>
+              </p>
+            )}
             <div className="mt-8 w-full max-w-[280px] space-y-3">
               <Button className="w-full rounded-full" onClick={() => navigate("/chat")}>
                 继续对话

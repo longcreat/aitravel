@@ -113,7 +113,7 @@ class PaymentService:
             _LOGGER.warning("Amount mismatch for %s", out_trade_no)
             return False
 
-        if self._store.mark_paid_and_grant(out_trade_no, int(order["quota"])):
+        if self._store.mark_paid_and_grant(out_trade_no, int(order["quota"]), trade_no=data.get("trade_no")):
             _LOGGER.info("Payment success and quota granted: %s", out_trade_no)
         return True
 

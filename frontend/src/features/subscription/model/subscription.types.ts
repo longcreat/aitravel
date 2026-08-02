@@ -40,5 +40,6 @@ export interface OrderQueryResponse {
   out_trade_no: string;
   order_status: OrderStatus;
   paid: boolean;
+  trade_no: string | null;
   remain_count: number;
 }

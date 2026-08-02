@@ -209,6 +209,7 @@ async def query_payment(
         "out_trade_no": req.out_trade_no,
         "order_status": order_status,
         "paid": order_status == "PAID",
+        "trade_no": order.get("trade_no"),
         "remain_count": payment_service.get_subscription(current_user.id)["remain_count"],
     }
 

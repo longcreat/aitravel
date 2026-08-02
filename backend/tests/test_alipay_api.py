@@ -63,6 +63,7 @@ def _create_paid_order(monkeypatch: pytest.MonkeyPatch, client: TestClient, toke
         "out_trade_no": out_trade_no,
         "total_amount": "9.90",
         "trade_status": "TRADE_SUCCESS",
+        "trade_no": "2026080212345678901234",
     }
     notify = client.post("/api/alipay/notify", data={**params, "sign": _sign_notify(params, sandbox_config["appPrivatePkcsKey"])})
     assert notify.text == "success"
@@ -207,6 +208,7 @@ def test_notify_success_grants_quota_idempotent(monkeypatch: pytest.MonkeyPatch,
         "out_trade_no": out_trade_no,
         "total_amount": "9.90",
         "trade_status": "TRADE_SUCCESS",
+        "trade_no": "2026080212345678901234",
     }
     sign = _sign_notify(params, sandbox_config["appPrivatePkcsKey"])
 
@@ -214,6 +216,9 @@ def test_notify_success_grants_quota_idempotent(monkeypatch: pytest.MonkeyPatch,
     assert notify.status_code == 200
     assert notify.headers["content-type"].startswith("text/plain")
     assert notify.text == "success"
+
+    query = client.post("/api/alipay/query", json={"out_trade_no": out_trade_no}, headers=_auth(token)).json()
+    assert query["trade_no"] == "2026080212345678901234"
 
     subscription = client.get("/api/alipay/subscription", headers=_auth(token)).json()
     assert subscription["remain_count"] == 50
@@ -252,6 +257,7 @@ def test_query_own_paid_order(monkeypatch: pytest.MonkeyPatch, client: TestClien
     assert payload["out_trade_no"] == out_trade_no
     assert payload["order_status"] == "PAID"
     assert payload["paid"] is True
+    assert payload["trade_no"] == "2026080212345678901234"
     assert payload["remain_count"] == 50
 
 

@@ -36,9 +36,16 @@ class FakeStore:
         self.paid_calls.append(out_trade_no)
         return True
 
-    def mark_paid_and_grant(self, out_trade_no: str, count: int, paid_at: str | None = None) -> bool:
+    def mark_paid_and_grant(
+        self,
+        out_trade_no: str,
+        count: int,
+        trade_no: str | None = None,
+        paid_at: str | None = None,
+    ) -> bool:
         if not self.mark_order_paid(out_trade_no, paid_at):
             return False
+        self.orders[out_trade_no]["trade_no"] = trade_no
         self.grant_quota(str(self.orders[out_trade_no]["user_id"]), count)
         return True
 

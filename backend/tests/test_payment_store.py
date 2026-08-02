@@ -84,16 +84,17 @@ def test_grant_quota(store: PaymentSQLiteStore, user_id: str) -> None:
 
 def test_mark_paid_and_grant(store: PaymentSQLiteStore, user_id: str) -> None:
     store.create_order("202608010004", user_id, "trial", "9.90", 50)
-    changed = store.mark_paid_and_grant("202608010004", 50, "2026-08-01T10:00:00")
+    changed = store.mark_paid_and_grant("202608010004", 50, "20260801234012345678", "2026-08-01T10:00:00")
     assert changed is True
     order = store.get_order("202608010004")
     assert order is not None
     assert order["status"] == "PAID"
+    assert order["trade_no"] == "20260801234012345678"
     row = store.get_quota(user_id)
     assert row is not None
     assert row["remain_count"] == 50
     # 幂等：重复调用返回 False 且只加一次
-    changed_again = store.mark_paid_and_grant("202608010004", 50, "2026-08-01T10:00:00")
+    changed_again = store.mark_paid_and_grant("202608010004", 50, "20260801234012345678", "2026-08-01T10:00:00")
     assert changed_again is False
     row = store.get_quota(user_id)
     assert row is not None

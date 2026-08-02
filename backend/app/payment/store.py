@@ -88,7 +88,13 @@ class PaymentSQLiteStore:
             )
             return cursor.rowcount == 1
 
-    def mark_paid_and_grant(self, out_trade_no: str, count: int, paid_at: str | None = None) -> bool:
+    def mark_paid_and_grant(
+        self,
+        out_trade_no: str,
+        count: int,
+        trade_no: str | None = None,
+        paid_at: str | None = None,
+    ) -> bool:
         """原子完成：PENDING→PAID 并给 user 加次数；失败/已处理返回 False。"""
         with self._connection() as conn:
             row = conn.execute(
@@ -100,10 +106,10 @@ class PaymentSQLiteStore:
             cursor = conn.execute(
                 """
                 UPDATE payment_orders
-                SET status = 'PAID', paid_at = ?
+                SET status = 'PAID', paid_at = ?, trade_no = ?
                 WHERE out_trade_no = ? AND status = 'PENDING'
                 """,
-                (paid_at or _utc_now_iso(), out_trade_no),
+                (paid_at or _utc_now_iso(), trade_no, out_trade_no),
             )
             if cursor.rowcount != 1:
                 return False
