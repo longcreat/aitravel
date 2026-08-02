@@ -3,9 +3,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
-  buildAlipayCheckoutForm,
   createPaymentOrder,
   fetchSubscription,
+  saveCheckoutOrder,
 } from "@/features/subscription/api/subscription.api";
 import type { SubscriptionStatus } from "@/features/subscription/model/subscription.types";
 import { Button, PageBackButton, useToast } from "@/shared/ui";
@@ -47,9 +47,8 @@ export function SubscribePage() {
     setPayingPackage(packageId);
     try {
       const payment = await createPaymentOrder(packageId);
-      const form = buildAlipayCheckoutForm(payment);
-      document.body.appendChild(form);
-      form.submit();
+      saveCheckoutOrder(payment);
+      navigate(`/profile/subscribe/checkout?out_trade_no=${payment.out_trade_no}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "请稍后重试";
       toast({ title: "下单失败", description: message, variant: "destructive" });

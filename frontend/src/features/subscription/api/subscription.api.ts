@@ -24,6 +24,26 @@ export async function queryPaymentOrder(outTradeNo: string): Promise<OrderQueryR
   return http.post<OrderQueryResponse>("/api/alipay/query", { out_trade_no: outTradeNo });
 }
 
+export function checkoutOrderStorageKey(outTradeNo: string): string {
+  return `wander:checkout-order:${outTradeNo}`;
+}
+
+export function saveCheckoutOrder(payment: PaymentOrderResponse): void {
+  sessionStorage.setItem(checkoutOrderStorageKey(payment.out_trade_no), JSON.stringify(payment));
+}
+
+export function loadCheckoutOrder(outTradeNo: string): PaymentOrderResponse | null {
+  const raw = sessionStorage.getItem(checkoutOrderStorageKey(outTradeNo));
+  if (!raw) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw) as PaymentOrderResponse;
+  } catch {
+    return null;
+  }
+}
+
 /** 依据 /pay 响应拼装隐藏表单，由调用方 append 到 document 后 submit 跳转收银台。 */
 export function buildAlipayCheckoutForm(payment: PaymentOrderResponse): HTMLFormElement {
   const form = document.createElement("form");

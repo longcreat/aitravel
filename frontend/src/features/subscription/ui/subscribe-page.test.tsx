@@ -9,19 +9,32 @@ import type {
 } from "@/features/subscription/model/subscription.types";
 import { SubscribePage } from "@/features/subscription/ui/subscribe-page";
 
-const { fetchSubscriptionMock, createPaymentOrderMock, buildAlipayCheckoutFormMock, toastMock } =
+const { fetchSubscriptionMock, createPaymentOrderMock, buildAlipayCheckoutFormMock, toastMock, navigateMock } =
   vi.hoisted(() => ({
     fetchSubscriptionMock: vi.fn(),
     createPaymentOrderMock: vi.fn(),
     buildAlipayCheckoutFormMock: vi.fn(),
     toastMock: vi.fn(),
+    navigateMock: vi.fn(),
   }));
 
-vi.mock("@/features/subscription/api/subscription.api", () => ({
-  fetchSubscription: fetchSubscriptionMock,
-  createPaymentOrder: createPaymentOrderMock,
-  buildAlipayCheckoutForm: buildAlipayCheckoutFormMock,
-}));
+vi.mock("@/features/subscription/api/subscription.api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/features/subscription/api/subscription.api")>();
+  return {
+    ...actual,
+    fetchSubscription: fetchSubscriptionMock,
+    createPaymentOrder: createPaymentOrderMock,
+    buildAlipayCheckoutForm: buildAlipayCheckoutFormMock,
+  };
+});
+
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router-dom")>();
+  return {
+    ...actual,
+    useNavigate: () => navigateMock,
+  };
+});
 
 vi.mock("@/shared/ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/shared/ui")>();
@@ -62,6 +75,8 @@ describe("SubscribePage", () => {
     createPaymentOrderMock.mockReset();
     buildAlipayCheckoutFormMock.mockReset();
     toastMock.mockReset();
+    navigateMock.mockReset();
+    sessionStorage.clear();
   });
 
   it("renders all three packages with names and prices", async () => {
@@ -94,7 +109,7 @@ describe("SubscribePage", () => {
     expect(statusLine).toHaveTextContent(/今日免费 8 次 \/ 已购 150 次/);
   });
 
-  it("creates the payment order and submits the checkout form on buy", async () => {
+  it("creates the payment order and navigates to the checkout page on buy", async () => {
     fetchSubscriptionMock.mockResolvedValue({
       daily_free_limit: 10,
       free_used: 0,
@@ -120,12 +135,6 @@ describe("SubscribePage", () => {
     };
     createPaymentOrderMock.mockResolvedValue(payment);
 
-    const submitSpy = vi.fn();
-    const fakeForm = document.createElement("form");
-    fakeForm.submit = submitSpy;
-    buildAlipayCheckoutFormMock.mockReturnValue(fakeForm);
-    const appendSpy = vi.spyOn(document.body, "appendChild");
-
     renderSubscribePage();
 
     const buyButton = await screen.findByRole("button", { name: "立即购买" });
@@ -134,10 +143,11 @@ describe("SubscribePage", () => {
     await waitFor(() => {
       expect(createPaymentOrderMock).toHaveBeenCalledWith("standard");
     });
-    expect(buildAlipayCheckoutFormMock).toHaveBeenCalledWith(payment);
-    expect(appendSpy).toHaveBeenCalledWith(fakeForm);
-    expect(submitSpy).toHaveBeenCalledTimes(1);
-    fakeForm.remove();
+    expect(buildAlipayCheckoutFormMock).not.toHaveBeenCalled();
+    expect(navigateMock).toHaveBeenCalledWith("/profile/subscribe/checkout?out_trade_no=order-1");
+    const stored = sessionStorage.getItem("wander:checkout-order:order-1");
+    expect(stored).not.toBeNull();
+    expect(JSON.parse(stored as string)).toMatchObject({ out_trade_no: "order-1", total_amount: "19.90" });
   });
 
   it("shows an error card and refetches on retry", async () => {
