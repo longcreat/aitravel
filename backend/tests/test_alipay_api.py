@@ -96,9 +96,10 @@ def test_packages_public(client: TestClient) -> None:
     response = client.get("/api/alipay/packages")
     assert response.status_code == 200
     packages = response.json()
-    assert len(packages) == 3
+    assert len(packages) == 4
     assert {package["id"]: package["price"] for package in packages} == {
         "trial": "9.90",
+        "mini": "0.01",
         "standard": "19.90",
         "unlimited": "39.90",
     }
@@ -117,7 +118,7 @@ def test_subscription_authed_shape(client: TestClient) -> None:
     assert payload["daily_free_limit"] == 10
     assert payload["free_used"] == 0
     assert payload["remain_count"] == 0
-    assert {package["id"] for package in payload["packages"]} == {"trial", "standard", "unlimited"}
+    assert {package["id"] for package in payload["packages"]} == {"trial", "mini", "standard", "unlimited"}
 
 
 def test_pay_requires_auth(client: TestClient) -> None:

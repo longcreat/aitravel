@@ -15,6 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PACKAGES: dict[str, dict[str, str | int]] = {
     "trial": {"name": "体验包", "price": "9.90", "quota": 50},
+    "mini": {"name": "0.01元体验", "price": "0.01", "quota": 10},
     "standard": {"name": "标准包", "price": "19.90", "quota": 150},
     "unlimited": {"name": "畅玩包", "price": "39.90", "quota": 500},
 }
