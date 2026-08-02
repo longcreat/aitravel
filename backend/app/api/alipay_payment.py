@@ -91,7 +91,8 @@ def _normalize_rsa_private_key(raw: str) -> str:
             key = load_pem_private_key(content.encode("utf-8"), password=None)
         else:
             key = load_der_private_key(base64.b64decode(content), password=None)
-        der = key.private_bytes(Encoding.DER, PrivateFormat.PKCS1, NoEncryption())
+        pkcs1_format = getattr(PrivateFormat, "PKCS1", None) or PrivateFormat.TraditionalOpenSSL
+        der = key.private_bytes(Encoding.DER, pkcs1_format, NoEncryption())
         return base64.b64encode(der).decode("ascii")
     except Exception:
         return content
