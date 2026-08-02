@@ -277,6 +277,21 @@ def test_pay_reads_private_key_from_file(
     assert response.json()["sign"]
 
 
+def test_pay_accepts_pkcs8_private_key_file(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("ALIPAY_PRIVATE_KEY", raising=False)
+    sandbox_config = _sandbox_config()
+    key_file = tmp_path / "alipay_private_key.pem"
+    key_file.write_text(sandbox_config["appPrivateKey"], encoding="utf-8")
+    monkeypatch.setenv("ALIPAY_PRIVATE_KEY_FILE", str(key_file))
+
+    token = _register_and_login(client)
+    response = client.post("/api/alipay/pay", json={"package_id": "trial"}, headers=_auth(token))
+    assert response.status_code == 200
+    assert response.json()["sign"]
+
+
 def test_return_redirects_to_result_page(client: TestClient) -> None:
     response = client.get(
         "/api/alipay/return",

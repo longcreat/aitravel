@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -60,15 +61,40 @@ _DEFAULT_PRIVATE_KEY_FILE = Path("/app/data/alipay_private_key.pem")
 
 
 def _alipay_private_key() -> str:
-    """应用私钥：优先环境变量，其次私钥文件（容器内 /app/data/alipay_private_key.pem）。"""
+    """应用私钥：优先环境变量，其次私钥文件（容器内 /app/data/alipay_private_key.pem）。
+
+    返回的私钥统一转换为 SDK 支持的 PKCS1 单行 base64（PKCS8 输入自动转换）。
+    """
     value = _env("ALIPAY_PRIVATE_KEY", _sandbox_value("appPrivatePkcsKey"))
-    if value:
-        return value
-    key_file = Path(os.getenv(_PRIVATE_KEY_FILE_ENV, str(_DEFAULT_PRIVATE_KEY_FILE)))
+    if not value:
+        key_file = Path(os.getenv(_PRIVATE_KEY_FILE_ENV, str(_DEFAULT_PRIVATE_KEY_FILE)))
+        try:
+            value = key_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    return _normalize_rsa_private_key(value)
+
+
+def _normalize_rsa_private_key(raw: str) -> str:
+    """将 PKCS8/PEM 私钥转为 PKCS1 单行 base64；已是 PKCS1 时原样返回。"""
+    content = raw.strip()
     try:
-        return key_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+            load_der_private_key,
+            load_pem_private_key,
+        )
+
+        if "-----BEGIN" in content:
+            key = load_pem_private_key(content.encode("utf-8"), password=None)
+        else:
+            key = load_der_private_key(base64.b64decode(content), password=None)
+        der = key.private_bytes(Encoding.DER, PrivateFormat.PKCS1, NoEncryption())
+        return base64.b64encode(der).decode("ascii")
+    except Exception:
+        return content
 
 
 def _require_alipay_config() -> None:
