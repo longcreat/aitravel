@@ -55,13 +55,29 @@ def expected_alipay_app_id() -> str:
     return _env("ALIPAY_APP_ID", _sandbox_value("appId"))
 
 
+_PRIVATE_KEY_FILE_ENV = "ALIPAY_PRIVATE_KEY_FILE"
+_DEFAULT_PRIVATE_KEY_FILE = Path("/app/data/alipay_private_key.pem")
+
+
+def _alipay_private_key() -> str:
+    """应用私钥：优先环境变量，其次私钥文件（容器内 /app/data/alipay_private_key.pem）。"""
+    value = _env("ALIPAY_PRIVATE_KEY", _sandbox_value("appPrivatePkcsKey"))
+    if value:
+        return value
+    key_file = Path(os.getenv(_PRIVATE_KEY_FILE_ENV, str(_DEFAULT_PRIVATE_KEY_FILE)))
+    try:
+        return key_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _require_alipay_config() -> None:
     """校验支付宝配置齐全，缺失时返回 500。"""
     missing = [
         name
         for name, value in (
             ("ALIPAY_APP_ID", expected_alipay_app_id()),
-            ("ALIPAY_PRIVATE_KEY", _env("ALIPAY_PRIVATE_KEY", _sandbox_value("appPrivatePkcsKey"))),
+            ("ALIPAY_PRIVATE_KEY", _alipay_private_key()),
             ("ALIPAY_PUBLIC_KEY", _env("ALIPAY_PUBLIC_KEY", _sandbox_value("alipayPublicKey"))),
         )
         if not value
@@ -125,7 +141,7 @@ async def create_payment(
         "return_url": return_url,
         "biz_content": biz_content,
     }
-    private_key = _env("ALIPAY_PRIVATE_KEY", _sandbox_value("appPrivatePkcsKey"))
+    private_key = _alipay_private_key()
     sign = sign_with_rsa2(private_key, get_sign_content(params), "utf-8")
 
     return {
