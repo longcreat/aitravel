@@ -2,6 +2,7 @@ import { ArrowUp, Brain, ChevronDown, Keyboard, Mic, Square } from "lucide-react
 import { FormEvent, useState, useRef, useEffect } from "react";
 
 import type { SendIntentResult } from "@/features/chat/model/chat.types";
+import { usePushToTalk } from "@/features/chat/hooks/use-push-to-talk";
 import { Button } from "@/shared/ui";
 
 interface ChatComposerProps {
@@ -25,7 +26,25 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<"text" | "voice">("text");
+  const [voiceText, setVoiceText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const {
+    recording,
+    interimText,
+    error: sttError,
+    start: startRecording,
+    finish: finishRecording,
+    cancel: cancelRecording,
+  } = usePushToTalk({
+    onInterim: (text) => setVoiceText(text),
+    onFinal: (text) => {
+      if (!loading && ready) {
+        void onSend(text);
+      }
+    },
+    onError: () => setVoiceText(""),
+  });
 
   useEffect(() => {
     if (value === "" && textareaRef.current) {
@@ -45,6 +64,19 @@ export function ChatComposer({
     if (result.status === "accepted") {
       setValue("");
     }
+  }
+
+  function switchToVoice() {
+    setMode("voice");
+    setVoiceText("");
+  }
+
+  function switchToText() {
+    if (recording) {
+      cancelRecording();
+    }
+    setMode("text");
+    setVoiceText("");
   }
 
   return (
@@ -101,7 +133,7 @@ export function ChatComposer({
                 type="button"
                 size="icon"
                 variant="ghost"
-                onClick={() => setMode("voice")}
+                onClick={switchToVoice}
                 className="h-9 w-9 text-muted-foreground hover:bg-muted hover:text-ink transition-all rounded-full active:scale-90"
                 aria-label="switch-to-voice"
               >
@@ -134,14 +166,53 @@ export function ChatComposer({
           </div>
         ) : (
           <div className="fade-up flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-4 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all">
-            <div className="flex flex-1 items-center justify-center gap-2 text-muted-foreground">
-              <span className="text-base select-none">按住 说话</span>
+            <div className="flex flex-1 items-center justify-center px-1 text-center">
+              {recording ? (
+                <span className="animate-pulse truncate text-sm text-ink" role="status">
+                  {interimText || "正在聆听…"}
+                </span>
+              ) : sttError ? (
+                <span className="text-xs text-rose-500" role="alert">
+                  {sttError}
+                </span>
+              ) : (
+                <span className="text-base select-none text-muted-foreground">按住 说话</span>
+              )}
             </div>
+            <button
+              type="button"
+              aria-label="push-to-talk"
+              disabled={!ready || loading}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                if (!recording) {
+                  startRecording();
+                }
+              }}
+              onPointerUp={() => {
+                if (recording) {
+                  finishRecording();
+                }
+              }}
+              onPointerCancel={() => {
+                if (recording) {
+                  cancelRecording();
+                }
+              }}
+              onPointerLeave={() => {
+                if (recording) {
+                  cancelRecording();
+                }
+              }}
+              className="flex h-14 w-14 items-center justify-center rounded-full bg-ink text-white shadow-lg transition-all active:scale-95 disabled:opacity-40 disabled:active:scale-100"
+            >
+              <Mic className="h-6 w-6" />
+            </button>
             <Button
               type="button"
               size="icon"
               variant="ghost"
-              onClick={() => setMode("text")}
+              onClick={switchToText}
               className="h-9 w-9 text-muted-foreground hover:bg-muted hover:text-ink transition-all shrink-0 rounded-full active:scale-90"
               aria-label="switch-to-keyboard"
             >

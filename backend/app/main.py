@@ -19,6 +19,7 @@ from app.api.health import router as health_router
 from app.api.sessions import router as sessions_router
 from app.api.speech import router as speech_router
 from app.api.alipay_payment import router as alipay_router
+from app.api.stt_ws import router as stt_router
 
 
 @asynccontextmanager
@@ -51,5 +52,6 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(speech_router)
     app.include_router(alipay_router)
+    app.include_router(stt_router)
 
     return app
