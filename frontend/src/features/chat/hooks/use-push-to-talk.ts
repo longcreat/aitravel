@@ -59,10 +59,12 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
   const isStartingRef = useRef<boolean>(false);
   const shouldFinishWhenStartedRef = useRef<boolean>(false);
   const hasEmittedFinalRef = useRef<boolean>(false);
+  const audioQueueRef = useRef<ArrayBuffer[]>([]);
 
   const cleanup = useCallback(() => {
     isStartingRef.current = false;
     shouldFinishWhenStartedRef.current = false;
+    audioQueueRef.current = [];
     if (doneTimerRef.current !== null) {
       window.clearTimeout(doneTimerRef.current);
       doneTimerRef.current = null;
@@ -114,6 +116,21 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
     [onFinal],
   );
 
+  const flushAudioQueue = useCallback(() => {
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN && audioQueueRef.current.length > 0) {
+      const queue = audioQueueRef.current;
+      audioQueueRef.current = [];
+      for (const pcmChunk of queue) {
+        try {
+          socket.send(pcmChunk);
+        } catch {
+          break;
+        }
+      }
+    }
+  }, []);
+
   const fail = useCallback(
     (message: string) => {
       cleanup();
@@ -126,6 +143,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
   );
 
   const sendFinishSignal = useCallback(() => {
+    flushAudioQueue();
     const socket = wsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       // 若 WebSocket 已经断开或未准备好，但有已识别的文本，则直接交出结果
@@ -163,7 +181,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
         fail("语音识别超时，请重试");
       }
     }, DONE_TIMEOUT_MS);
-  }, [cleanup, emitFinal, fail]);
+  }, [cleanup, emitFinal, fail, flushAudioQueue]);
 
   const start = useCallback(() => {
     if (recording || isStartingRef.current) {
@@ -172,6 +190,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
     isStartingRef.current = true;
     shouldFinishWhenStartedRef.current = false;
     hasEmittedFinalRef.current = false;
+    audioQueueRef.current = [];
     latestTextRef.current = "";
     setError(null);
     setInterimText("");
@@ -194,6 +213,9 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
       return;
     }
     wsRef.current = socket;
+    socket.onopen = () => {
+      flushAudioQueue();
+    };
     socket.onclose = () => {
       if (wsRef.current === socket) {
         setRecording(false);
@@ -254,12 +276,20 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
         contextRef.current = audioContext;
         const source = audioContext.createMediaStreamSource(stream);
         sourceRef.current = source;
-        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        const processor = audioContext.createScriptProcessor(2048, 1, 1);
         processorRef.current = processor;
         processor.onaudioprocess = (event) => {
           const input = event.inputBuffer.getChannelData(0);
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && audioContext) {
-            wsRef.current.send(pcm16Encode(input, audioContext.sampleRate));
+          if (audioContext) {
+            const pcm = pcm16Encode(input, audioContext.sampleRate);
+            const currentWs = wsRef.current;
+            if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+              flushAudioQueue();
+              currentWs.send(pcm);
+            } else {
+              // 暂存建连前的PCM音频帧，防止丢失前半段语音
+              audioQueueRef.current.push(pcm);
+            }
           }
         };
         source.connect(processor);
@@ -276,7 +306,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
         fail("无法访问麦克风，请检查浏览器权限");
       }
     })();
-  }, [cleanup, fail, onFinal, onInterim, recording, sendFinishSignal]);
+  }, [cleanup, emitFinal, fail, flushAudioQueue, sendFinishSignal]);
 
   const finish = useCallback(() => {
     if (isStartingRef.current) {
