@@ -71,15 +71,36 @@ class DashScopeSttSession:
         """SDK 回调：result-generated。"""
         try:
             sentence = result.get_sentence()
-            is_end = bool(result.is_sentence_end())
         except Exception:  # noqa: BLE001 - 解析失败丢弃该帧
             _LOGGER.exception("STT parse result failed")
             return
         text = ""
+        is_end = False
         if isinstance(sentence, dict):
             text = str(sentence.get("text", ""))
+            try:
+                is_end = bool(result.is_sentence_end(sentence))
+            except TypeError:
+                is_end = bool(result.is_sentence_end())
+            except Exception:
+                is_end = "end_time" in sentence and sentence["end_time"] is not None
         elif isinstance(sentence, list):
             text = "".join(str(item.get("text", "")) for item in sentence if isinstance(item, dict))
+            for item in sentence:
+                if isinstance(item, dict):
+                    try:
+                        if result.is_sentence_end(item):
+                            is_end = True
+                            break
+                    except TypeError:
+                        if result.is_sentence_end():
+                            is_end = True
+                            break
+                    except Exception:
+                        if "end_time" in item and item["end_time"] is not None:
+                            is_end = True
+                            break
+
         clean_text = text.strip()
         if clean_text:
             self._latest_text = clean_text

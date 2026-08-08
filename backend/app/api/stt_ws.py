@@ -87,5 +87,12 @@ async def stt_websocket(
     finally:
         await asyncio.to_thread(session.finish)
         if forward_task is not None:
-            await forward_task
-        await websocket.close()
+            forward_task.cancel()
+            try:
+                await forward_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
