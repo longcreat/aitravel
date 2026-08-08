@@ -171,6 +171,26 @@ describe("usePushToTalk", () => {
     expect(frame?.byteLength).toBe(4096 * 2);
   });
 
+  it("48kHz 音频帧降采样为 16kHz PCM16 后再发送", async () => {
+    const { result } = renderHook(() => usePushToTalk({ onInterim: vi.fn(), onFinal: vi.fn(), onError: vi.fn() }));
+
+    await act(async () => {
+      result.current.start();
+      await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+      lastSocket().open();
+    });
+
+    const context = FakeAudioContext.instances[0];
+    context.sampleRate = 48000;
+    act(() => {
+      context.emitAudio(new Float32Array(4096).fill(0.5));
+    });
+
+    const frame = lastSocket().sent.find((item) => item instanceof ArrayBuffer) as ArrayBuffer | undefined;
+    expect(frame).toBeInstanceOf(ArrayBuffer);
+    expect(frame?.byteLength).toBe(Math.floor(4096 / 3) * 2);
+  });
+
   it("收到中间结果时更新 interimText", async () => {
     const onInterim = vi.fn();
     const { result } = renderHook(() => usePushToTalk({ onInterim, onFinal: vi.fn(), onError: vi.fn() }));

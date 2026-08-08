@@ -17,10 +17,11 @@ function resolveSttWsUrl(): string {
 }
 
 function pcm16Encode(chunk: Float32Array, sampleRate: number): ArrayBuffer {
-  const output = new ArrayBuffer(chunk.length * 2);
-  const view = new DataView(output);
   const step = sampleRate / TARGET_SAMPLE_RATE;
-  for (let i = 0; i < chunk.length; i += 1) {
+  const outLen = Math.max(1, Math.floor(chunk.length / step));
+  const output = new ArrayBuffer(outLen * 2);
+  const view = new DataView(output);
+  for (let i = 0; i < outLen; i += 1) {
     let sample = chunk[Math.min(chunk.length - 1, Math.floor(i * step))];
     sample = Math.max(-1, Math.min(1, sample));
     view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
