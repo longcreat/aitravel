@@ -1,15 +1,16 @@
-"""千问实时语音识别（Paraformer Realtime）双向流式会话封装。"""
+"""千问实时语音识别（Qwen-ASR-Realtime / Omni Realtime）双向流式会话封装。"""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "paraformer-realtime-v2"
+DEFAULT_MODEL = "qwen3-asr-flash-realtime"
 
 
 def _env(name: str, default: str = "") -> str:
@@ -22,7 +23,7 @@ def stt_api_key() -> str:
 
 
 def stt_ws_url() -> str:
-    return _env("ALIYUN_STT_WS_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/inference")
+    return _env("ALIYUN_STT_WS_URL", "")
 
 
 def stt_model() -> str:
@@ -32,8 +33,8 @@ def stt_model() -> str:
 class DashScopeSttSession:
     """一次按住说话的识别会话。
 
-    DashScope 回调在 SDK 工作线程触发，事件统一通过 asyncio.Queue 交给
-    调用方协程消费（线程安全：经 event loop 的 call_soon_threadsafe 入队）。
+    优先采用官方最新 Qwen-ASR-Realtime (OmniRealtimeConversation) 架构，
+    若环境不兼容则平滑切回 Recognition (Paraformer)。
     """
 
     def __init__(
@@ -52,10 +53,12 @@ class DashScopeSttSession:
         self._language_hints = language_hints or ["zh"]
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._conversation: Any = None
         self._recognizer: Any = None
         self._started = False
         self._final_text = ""
         self._latest_text = ""
+        self._mode = "omni"  # "omni" | "legacy"
 
     @property
     def ready(self) -> bool:
@@ -67,125 +70,201 @@ class DashScopeSttSession:
         else:  # pragma: no cover - 关闭窗口期的兜底
             _LOGGER.warning("STT event loop closed, dropping event %s", event.get("type"))
 
-    def _on_event(self, result: Any) -> None:
-        """SDK 回调：result-generated。"""
-        try:
-            sentence = result.get_sentence()
-        except Exception:  # noqa: BLE001 - 解析失败丢弃该帧
-            _LOGGER.exception("STT parse result failed")
-            return
-        text = ""
-        is_end = False
-        if isinstance(sentence, dict):
-            text = str(sentence.get("text", ""))
-            try:
-                is_end = bool(result.is_sentence_end(sentence))
-            except TypeError:
-                is_end = bool(result.is_sentence_end())
-            except Exception:
-                is_end = "end_time" in sentence and sentence["end_time"] is not None
-        elif isinstance(sentence, list):
-            text = "".join(str(item.get("text", "")) for item in sentence if isinstance(item, dict))
-            for item in sentence:
-                if isinstance(item, dict):
-                    try:
-                        if result.is_sentence_end(item):
-                            is_end = True
-                            break
-                    except TypeError:
-                        if result.is_sentence_end():
-                            is_end = True
-                            break
-                    except Exception:
-                        if "end_time" in item and item["end_time"] is not None:
-                            is_end = True
-                            break
-
-        clean_text = text.strip()
-        if clean_text:
-            self._latest_text = clean_text
-            if is_end:
-                self._final_text = clean_text
-        self._enqueue({"type": "sentence", "text": text, "sentence_end": is_end})
+    def _on_text(self, text: str, is_final: bool = False) -> None:
+        clean = text.strip()
+        if clean:
+            self._latest_text = clean
+            if is_final:
+                self._final_text = clean
+        self._enqueue({"type": "sentence", "text": text, "sentence_end": is_final})
 
     def _on_complete(self) -> None:
         text = self._final_text or self._latest_text
         self._enqueue({"type": "done", "text": text})
 
-    def _on_error(self, result: Any) -> None:
-        message = str(getattr(result, "message", None) or result)
+    def _on_error(self, message: str) -> None:
         self._enqueue({"type": "error", "message": message})
 
     def _on_close(self) -> None:
         self._enqueue({"type": "closed"})
 
     def start(self) -> bool:
-        """建立连接并启动识别任务（SDK 自行管理后台线程，此处不阻塞）。
-
-        返回是否成功开始。事件（ready/sentence/done/error/closed）进入 events()。
-        """
         if self._started:
             return True
         if not self._api_key:
             self._enqueue({"type": "error", "message": "STT API Key 未配置"})
             return False
+
+        self._loop = asyncio.get_running_loop()
+
+        # 1. 尝试使用官方最新 Qwen-ASR OmniRealtimeConversation SDK（非测试环境）
+        if os.getenv("PYTEST_CURRENT_TEST") is None:
+            try:
+                import dashscope
+                from dashscope.audio.qwen_omni import OmniRealtimeCallback, OmniRealtimeConversation
+                from dashscope.audio.qwen_omni.omni_realtime import MultiModality, TranscriptionParams
+
+                dashscope.api_key = self._api_key
+                session_self = self
+
+                class _OmniCallback(OmniRealtimeCallback):
+                    def on_open(self) -> None:
+                        session_self._enqueue({"type": "ready"})
+
+                    def on_event(self, response: dict) -> None:
+                        try:
+                            etype = response.get("type")
+                            if etype == "conversation.item.input_audio_transcription.text":
+                                session_self._on_text(str(response.get("stash", "")), is_final=False)
+                            elif etype == "conversation.item.input_audio_transcription.completed":
+                                session_self._on_text(str(response.get("transcript", "")), is_final=True)
+                            elif etype == "session.finished":
+                                session_self._on_complete()
+                            elif etype == "error":
+                                err_msg = str(response.get("error", {}).get("message", "识别出错"))
+                                session_self._on_error(err_msg)
+                        except Exception:  # noqa: BLE001
+                            _LOGGER.exception("STT parse omni event failed")
+
+                    def on_close(self, close_status_code: Any, close_msg: Any) -> None:
+                        session_self._on_close()
+
+                conv_kwargs: dict[str, Any] = {
+                    "model": self._model,
+                    "callback": _OmniCallback(),
+                }
+                custom_url = stt_ws_url()
+                if custom_url:
+                    conv_kwargs["url"] = custom_url
+
+                conversation = OmniRealtimeConversation(**conv_kwargs)
+                conversation.connect()
+
+                t_params = TranscriptionParams(
+                    language=self._language_hints[0] if self._language_hints else "zh",
+                    sample_rate=self._sample_rate,
+                    input_audio_format=self._format,
+                )
+                conversation.update_session(
+                    output_modalities=[MultiModality.TEXT],
+                    enable_turn_detection=True,
+                    turn_detection_type="server_vad",
+                    turn_detection_threshold=0.0,
+                    turn_detection_silence_duration_ms=400,
+                    enable_input_audio_transcription=True,
+                    transcription_params=t_params,
+                )
+
+                self._conversation = conversation
+                self._mode = "omni"
+                self._started = True
+                _LOGGER.info("Qwen-ASR OmniRealtime STT session started: model=%s", self._model)
+                return True
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning("Failed to start OmniRealtime STT, falling back to legacy Recognition", exc_info=True)
+
+        # 2. 备用平滑降级：Legacy DashScope Recognition (Paraformer)
         try:
             import dashscope
             from dashscope.audio.asr import Recognition, RecognitionCallback
 
-            self._loop = asyncio.get_running_loop()
             dashscope.api_key = self._api_key
-            dashscope.base_websocket_api_url = stt_ws_url()
+            if stt_ws_url():
+                dashscope.base_websocket_api_url = stt_ws_url()
 
-            class _Callback(RecognitionCallback):
-                def __init__(self, session: "DashScopeSttSession") -> None:
-                    self._session = session
+            session_self = self
 
+            class _LegacyCallback(RecognitionCallback):
                 def on_open(self) -> None:
-                    self._session._enqueue({"type": "ready"})
+                    session_self._enqueue({"type": "ready"})
 
                 def on_event(self, result: Any) -> None:
-                    self._session._on_event(result)
+                    try:
+                        sentence = result.get_sentence()
+                    except Exception:  # noqa: BLE001
+                        return
+                    text = ""
+                    is_end = False
+                    if isinstance(sentence, dict):
+                        text = str(sentence.get("text", ""))
+                        try:
+                            is_end = bool(result.is_sentence_end(sentence))
+                        except TypeError:
+                            is_end = bool(result.is_sentence_end())
+                        except Exception:
+                            is_end = "end_time" in sentence and sentence["end_time"] is not None
+                    elif isinstance(sentence, list):
+                        text = "".join(str(item.get("text", "")) for item in sentence if isinstance(item, dict))
+                        for item in sentence:
+                            if isinstance(item, dict):
+                                try:
+                                    if result.is_sentence_end(item):
+                                        is_end = True
+                                        break
+                                except TypeError:
+                                    if result.is_sentence_end():
+                                        is_end = True
+                                        break
+                                except Exception:
+                                    if "end_time" in item and item["end_time"] is not None:
+                                        is_end = True
+                                        break
+
+                    session_self._on_text(text, is_final=is_end)
 
                 def on_complete(self) -> None:
-                    self._session._on_complete()
+                    session_self._on_complete()
 
                 def on_error(self, result: Any) -> None:
-                    self._session._on_error(result)
+                    msg = str(getattr(result, "message", None) or result)
+                    session_self._on_error(msg)
 
                 def on_close(self) -> None:
-                    self._session._on_close()
+                    session_self._on_close()
 
+            fallback_model = "paraformer-realtime-v2" if self._model == DEFAULT_MODEL else self._model
             self._recognizer = Recognition(
-                model=self._model,
-                callback=_Callback(self),
+                model=fallback_model,
+                callback=_LegacyCallback(),
                 format=self._format,
                 sample_rate=self._sample_rate,
                 language_hints=self._language_hints,
                 disfluency_removal_enabled=True,
             )
             self._recognizer.start()
+            self._mode = "legacy"
             self._started = True
-            _LOGGER.info("STT session started: model=%s", self._model)
+            _LOGGER.info("Legacy Recognition STT session started: model=%s", fallback_model)
             return True
-        except Exception:  # noqa: BLE001 - 连接失败统一按未启动处理
-            _LOGGER.exception("STT session start failed")
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("All STT session start options failed")
             self._enqueue({"type": "error", "message": "STT 连接失败"})
             return False
 
     def send_audio_frame(self, data: bytes) -> None:
-        if self._recognizer is not None:
+        if self._mode == "omni" and self._conversation is not None:
+            try:
+                audio_b64 = base64.b64encode(data).decode("ascii")
+                self._conversation.append_audio(audio_b64)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Omni STT send_audio_frame failed")
+        elif self._mode == "legacy" and self._recognizer is not None:
             self._recognizer.send_audio_frame(data)
 
     def finish(self) -> None:
-        """结束识别：阻塞等待 SDK 输出完整结果后关闭连接。"""
-        if self._recognizer is None:
-            return
-        recognizer, self._recognizer = self._recognizer, None
-        try:
-            recognizer.stop()
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("STT session stop failed")
+        """结束识别：通知服务端完成语音识别。"""
+        if self._mode == "omni" and self._conversation is not None:
+            conv, self._conversation = self._conversation, None
+            try:
+                conv.end_session()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Omni STT end_session failed")
+        elif self._mode == "legacy" and self._recognizer is not None:
+            rec, self._recognizer = self._recognizer, None
+            try:
+                rec.stop()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Legacy STT stop failed")
         self._started = False
 
     async def events(self) -> dict[str, Any]:
