@@ -276,7 +276,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
         contextRef.current = audioContext;
         const source = audioContext.createMediaStreamSource(stream);
         sourceRef.current = source;
-        const processor = audioContext.createScriptProcessor(2048, 1, 1);
+        const processor = audioContext.createScriptProcessor(1024, 1, 1);
         processorRef.current = processor;
         processor.onaudioprocess = (event) => {
           const input = event.inputBuffer.getChannelData(0);

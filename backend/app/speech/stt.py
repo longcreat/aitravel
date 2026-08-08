@@ -147,10 +147,7 @@ class DashScopeSttSession:
                 )
                 conversation.update_session(
                     output_modalities=[MultiModality.TEXT],
-                    enable_turn_detection=True,
-                    turn_detection_type="server_vad",
-                    turn_detection_threshold=0.0,
-                    turn_detection_silence_duration_ms=400,
+                    enable_turn_detection=False,
                     enable_input_audio_transcription=True,
                     transcription_params=t_params,
                 )
@@ -256,6 +253,10 @@ class DashScopeSttSession:
         if self._mode == "omni" and self._conversation is not None:
             conv, self._conversation = self._conversation, None
             try:
+                try:
+                    conv.commit()
+                except Exception:  # noqa: BLE001
+                    pass
                 conv.end_session()
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Omni STT end_session failed")

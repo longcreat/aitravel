@@ -31,7 +31,7 @@ async def _forward_events(websocket: WebSocket, session: DashScopeSttSession) ->
         while True:
             event = await session.events()
             if event["type"] == "closed":
-                return
+                break
             await websocket.send_text(json.dumps(event, ensure_ascii=False))
     except WebSocketDisconnect:  # pragma: no cover - 前端中途断连
         return
@@ -87,11 +87,10 @@ async def stt_websocket(
     finally:
         await asyncio.to_thread(session.finish)
         if forward_task is not None:
-            forward_task.cancel()
             try:
-                await forward_task
-            except (asyncio.CancelledError, Exception):
-                pass
+                await asyncio.wait_for(forward_task, timeout=5.0)
+            except Exception:
+                forward_task.cancel()
         try:
             await websocket.close()
         except Exception:
