@@ -165,20 +165,7 @@ export function ChatComposer({
             </div>
           </div>
         ) : (
-          <div className="fade-up flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-4 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all">
-            <div className="flex flex-1 items-center justify-center px-1 text-center">
-              {recording ? (
-                <span className="animate-pulse truncate text-sm text-ink" role="status">
-                  {interimText || "正在聆听…"}
-                </span>
-              ) : sttError ? (
-                <span className="text-xs text-rose-500" role="alert">
-                  {sttError}
-                </span>
-              ) : (
-                <span className="text-base select-none text-muted-foreground">按住 说话</span>
-              )}
-            </div>
+          <div className="fade-up flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-2 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all">
             <button
               type="button"
               aria-label="push-to-talk"
@@ -204,9 +191,24 @@ export function ChatComposer({
                   cancelRecording();
                 }
               }}
-              className="flex h-14 w-14 items-center justify-center rounded-full bg-ink text-white shadow-lg transition-all active:scale-95 disabled:opacity-40 disabled:active:scale-100"
+              className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 font-medium transition-all select-none touch-none ${
+                recording
+                  ? "bg-ink text-white shadow-inner animate-pulse"
+                  : "bg-muted/50 text-ink hover:bg-muted active:scale-[0.99]"
+              } disabled:opacity-40`}
             >
-              <Mic className="h-6 w-6" />
+              <Mic className={`h-4 w-4 ${recording ? "animate-bounce" : ""}`} />
+              <span className="text-base select-none">
+                {recording ? (
+                  interimText || "正在聆听，松开发送…"
+                ) : sttError ? (
+                  <span className="text-xs text-rose-500" role="alert">
+                    {sttError}
+                  </span>
+                ) : (
+                  "按住 说话"
+                )}
+              </span>
             </button>
             <Button
               type="button"
