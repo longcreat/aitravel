@@ -58,6 +58,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
   const latestTextRef = useRef<string>("");
   const isStartingRef = useRef<boolean>(false);
   const shouldFinishWhenStartedRef = useRef<boolean>(false);
+  const hasEmittedFinalRef = useRef<boolean>(false);
 
   const cleanup = useCallback(() => {
     isStartingRef.current = false;
@@ -101,6 +102,18 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
     }
   }, []);
 
+  const emitFinal = useCallback(
+    (text: string) => {
+      const clean = text.trim();
+      if (!clean || hasEmittedFinalRef.current) {
+        return;
+      }
+      hasEmittedFinalRef.current = true;
+      onFinal(clean);
+    },
+    [onFinal],
+  );
+
   const fail = useCallback(
     (message: string) => {
       cleanup();
@@ -121,7 +134,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
       setRecording(false);
       setInterimText("");
       if (fallback) {
-        onFinal(fallback);
+        emitFinal(fallback);
       } else {
         fail("语音识别连接已断开");
       }
@@ -135,7 +148,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
       setRecording(false);
       setInterimText("");
       if (fallback) {
-        onFinal(fallback);
+        emitFinal(fallback);
       }
       return;
     }
@@ -145,12 +158,12 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
       setRecording(false);
       setInterimText("");
       if (fallback) {
-        onFinal(fallback);
+        emitFinal(fallback);
       } else {
         fail("语音识别超时，请重试");
       }
     }, DONE_TIMEOUT_MS);
-  }, [cleanup, fail, onFinal]);
+  }, [cleanup, emitFinal, fail]);
 
   const start = useCallback(() => {
     if (recording || isStartingRef.current) {
@@ -158,6 +171,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
     }
     isStartingRef.current = true;
     shouldFinishWhenStartedRef.current = false;
+    hasEmittedFinalRef.current = false;
     latestTextRef.current = "";
     setError(null);
     setInterimText("");
@@ -211,12 +225,12 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
             window.clearTimeout(doneTimerRef.current);
             doneTimerRef.current = null;
           }
+          const text = (message.text ?? "").trim() || latestTextRef.current.trim();
           cleanup();
           setRecording(false);
           setInterimText("");
-          const text = (message.text ?? "").trim() || latestTextRef.current.trim();
           if (text) {
-            onFinal(text);
+            emitFinal(text);
           }
         } else if (message.type === "error") {
           fail(message.message ?? "语音识别失败");

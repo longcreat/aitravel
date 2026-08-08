@@ -191,10 +191,8 @@ export function ChatComposer({
                 }
                 finishRecording();
               }}
-              onPointerCancel={() => {
-                finishRecording();
-              }}
-              onPointerLeave={() => {
+              onPointerCancel={(event) => {
+                event.preventDefault();
                 finishRecording();
               }}
               className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 font-medium transition-all select-none touch-none ${
