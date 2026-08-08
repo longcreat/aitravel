@@ -155,8 +155,9 @@ class DashScopeSttSession:
         """结束识别：阻塞等待 SDK 输出完整结果后关闭连接。"""
         if self._recognizer is None:
             return
+        recognizer, self._recognizer = self._recognizer, None
         try:
-            self._recognizer.stop()
+            recognizer.stop()
         except Exception:  # noqa: BLE001
             _LOGGER.exception("STT session stop failed")
         self._started = False
