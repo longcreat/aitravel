@@ -55,6 +55,7 @@ class DashScopeSttSession:
         self._recognizer: Any = None
         self._started = False
         self._final_text = ""
+        self._latest_text = ""
 
     @property
     def ready(self) -> bool:
@@ -79,12 +80,16 @@ class DashScopeSttSession:
             text = str(sentence.get("text", ""))
         elif isinstance(sentence, list):
             text = "".join(str(item.get("text", "")) for item in sentence if isinstance(item, dict))
-        if text.strip() and is_end:
-            self._final_text = text
+        clean_text = text.strip()
+        if clean_text:
+            self._latest_text = clean_text
+            if is_end:
+                self._final_text = clean_text
         self._enqueue({"type": "sentence", "text": text, "sentence_end": is_end})
 
     def _on_complete(self) -> None:
-        self._enqueue({"type": "done", "text": self._final_text})
+        text = self._final_text or self._latest_text
+        self._enqueue({"type": "done", "text": text})
 
     def _on_error(self, result: Any) -> None:
         message = str(getattr(result, "message", None) or result)

@@ -55,8 +55,13 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const doneTimerRef = useRef<number | null>(null);
+  const latestTextRef = useRef<string>("");
+  const isStartingRef = useRef<boolean>(false);
+  const shouldFinishWhenStartedRef = useRef<boolean>(false);
 
   const cleanup = useCallback(() => {
+    isStartingRef.current = false;
+    shouldFinishWhenStartedRef.current = false;
     if (doneTimerRef.current !== null) {
       window.clearTimeout(doneTimerRef.current);
       doneTimerRef.current = null;
@@ -107,15 +112,59 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
     [cleanup, onError],
   );
 
-  const start = useCallback(() => {
-    if (recording) {
+  const sendFinishSignal = useCallback(() => {
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      // 若 WebSocket 已经断开或未准备好，但有已识别的文本，则直接交出结果
+      const fallback = latestTextRef.current.trim();
+      cleanup();
+      setRecording(false);
+      setInterimText("");
+      if (fallback) {
+        onFinal(fallback);
+      } else {
+        fail("语音识别连接已断开");
+      }
       return;
     }
+    try {
+      socket.send(JSON.stringify({ action: "finish" }));
+    } catch {
+      const fallback = latestTextRef.current.trim();
+      cleanup();
+      setRecording(false);
+      setInterimText("");
+      if (fallback) {
+        onFinal(fallback);
+      }
+      return;
+    }
+    doneTimerRef.current = window.setTimeout(() => {
+      const fallback = latestTextRef.current.trim();
+      cleanup();
+      setRecording(false);
+      setInterimText("");
+      if (fallback) {
+        onFinal(fallback);
+      } else {
+        fail("语音识别超时，请重试");
+      }
+    }, DONE_TIMEOUT_MS);
+  }, [cleanup, fail, onFinal]);
+
+  const start = useCallback(() => {
+    if (recording || isStartingRef.current) {
+      return;
+    }
+    isStartingRef.current = true;
+    shouldFinishWhenStartedRef.current = false;
+    latestTextRef.current = "";
     setError(null);
     setInterimText("");
 
     const token = getStoredAccessToken();
     if (!token) {
+      isStartingRef.current = false;
       fail("请先登录后再使用语音输入");
       return;
     }
@@ -126,6 +175,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
     try {
       socket = new WebSocket(`${resolveSttWsUrl()}?token=${encodeURIComponent(token)}`);
     } catch {
+      isStartingRef.current = false;
       fail("无法连接语音识别服务");
       return;
     }
@@ -136,6 +186,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
       }
     };
     socket.onerror = () => {
+      isStartingRef.current = false;
       fail("语音识别连接异常");
     };
     socket.onmessage = (event) => {
@@ -147,9 +198,13 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
           message?: string;
         };
         if (message.type === "sentence") {
-          setInterimText(message.text ?? "");
-          if (message.text) {
-            onInterim(message.text);
+          const currentText = message.text ?? "";
+          if (currentText.trim()) {
+            latestTextRef.current = currentText.trim();
+          }
+          setInterimText(currentText);
+          if (currentText) {
+            onInterim(currentText);
           }
         } else if (message.type === "done") {
           if (doneTimerRef.current !== null) {
@@ -159,7 +214,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
           cleanup();
           setRecording(false);
           setInterimText("");
-          const text = (message.text ?? "").trim();
+          const text = (message.text ?? "").trim() || latestTextRef.current.trim();
           if (text) {
             onFinal(text);
           }
@@ -177,6 +232,7 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
         streamRef.current = stream;
         const AudioContextCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
         if (!AudioContextCtor) {
+          isStartingRef.current = false;
           fail("当前浏览器不支持录音");
           return;
         }
@@ -194,24 +250,27 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
         };
         source.connect(processor);
         processor.connect(audioContext.destination);
+        isStartingRef.current = false;
         setRecording(true);
+
+        if (shouldFinishWhenStartedRef.current) {
+          shouldFinishWhenStartedRef.current = false;
+          sendFinishSignal();
+        }
       } catch {
+        isStartingRef.current = false;
         fail("无法访问麦克风，请检查浏览器权限");
       }
     })();
-  }, [cleanup, fail, onFinal, onInterim, recording]);
+  }, [cleanup, fail, onFinal, onInterim, recording, sendFinishSignal]);
 
   const finish = useCallback(() => {
-    const socket = wsRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      fail("语音识别连接已断开");
+    if (isStartingRef.current) {
+      shouldFinishWhenStartedRef.current = true;
       return;
     }
-    socket.send(JSON.stringify({ action: "finish" }));
-    doneTimerRef.current = window.setTimeout(() => {
-      fail("语音识别超时，请重试");
-    }, DONE_TIMEOUT_MS);
-  }, [fail]);
+    sendFinishSignal();
+  }, [sendFinishSignal]);
 
   const cancel = useCallback(() => {
     cleanup();

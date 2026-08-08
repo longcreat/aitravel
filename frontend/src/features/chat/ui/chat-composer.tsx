@@ -170,26 +170,32 @@ export function ChatComposer({
               type="button"
               aria-label="push-to-talk"
               disabled={!ready || loading}
+              onContextMenu={(e) => e.preventDefault()}
               onPointerDown={(event) => {
                 event.preventDefault();
-                if (!recording) {
-                  startRecording();
+                try {
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                } catch {
+                  // 某些老旧环境不支持 setPointerCapture
                 }
+                startRecording();
               }}
-              onPointerUp={() => {
-                if (recording) {
-                  finishRecording();
+              onPointerUp={(event) => {
+                event.preventDefault();
+                try {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  }
+                } catch {
+                  // 忽略捕获释放错误
                 }
+                finishRecording();
               }}
               onPointerCancel={() => {
-                if (recording) {
-                  cancelRecording();
-                }
+                finishRecording();
               }}
               onPointerLeave={() => {
-                if (recording) {
-                  cancelRecording();
-                }
+                finishRecording();
               }}
               className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 font-medium transition-all select-none touch-none ${
                 recording
