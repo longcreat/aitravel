@@ -161,6 +161,7 @@ function ChatPageInner() {
     selectedModelProfileKey,
     selectedModelProfile,
     loading,
+    error: chatError,
     isAuthenticated,
     canStartRequest,
     sendMessage,
@@ -200,6 +201,14 @@ function ChatPageInner() {
     onUtteranceResolved: voiceUtterances.resolved,
     onUtteranceFailed: voiceUtterances.failed,
   });
+
+  // 流式错误（如免费次数用完）在 turn 创建前到达时没有消息可挂，
+  // error 状态此前从未被展示，导致"发送后无声无息"；统一 toast 兜底
+  useEffect(() => {
+    if (chatError) {
+      toast({ description: chatError });
+    }
+  }, [chatError]);
   
   const listRef = useRef<HTMLDivElement | null>(null);
   const pendingNewThreadIdRef = useRef<string | null>(null);
