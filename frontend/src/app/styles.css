@@ -141,6 +141,26 @@ textarea {
   animation: typing-bounce 1.2s ease-in-out infinite;
 }
 
+/* 语音录制均衡器竖条（chat-composer 录音态） */
+@keyframes voice-eq {
+  0%, 100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.voice-eq-bar {
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  border-radius: 9999px;
+  background-color: currentColor;
+  transform-origin: center;
+  animation: voice-eq 0.9s ease-in-out infinite;
+}
+
 /* Citation chips */
 .citation-chip {
   display: inline-flex;

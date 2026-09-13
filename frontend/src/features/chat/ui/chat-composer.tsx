@@ -19,6 +19,17 @@ interface ChatComposerProps {
   onStop: () => void;
 }
 
+/** 录音态均衡器竖条：4 根错相位跳动（纯 CSS 动画） */
+function EqualizerBars() {
+  return (
+    <span className="flex items-center gap-[3px]" aria-hidden="true">
+      {[0, 120, 240, 360].map((delay) => (
+        <span key={delay} className="voice-eq-bar" style={{ animationDelay: `${delay}ms` }} />
+      ))}
+    </span>
+  );
+}
+
 export function ChatComposer({
   loading,
   ready,
@@ -116,8 +127,9 @@ export function ChatComposer({
     setArmed(false);
   }
 
-  const voiceRecording = voice.status === "recording";
-  const voiceCancelHint = voiceRecording && cancelArmed;
+  // starting 与 recording 视觉合并：按下即进入录音态，建连过程（<300ms）对用户无感
+  const voiceActive = voice.status === "recording" || voice.status === "starting";
+  const voiceCancelHint = voiceActive && cancelArmed;
 
   return (
     <form
@@ -215,21 +227,17 @@ export function ChatComposer({
               onPointerMove={handleVoicePointerMove}
               onPointerUp={handleVoicePointerUp}
               onPointerCancel={handleVoicePointerCancel}
-              className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 font-medium transition-all select-none touch-none ${
+              className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 font-medium transition-colors duration-150 select-none touch-none ${
                 voiceCancelHint
                   ? "bg-[#b95a46] text-white shadow-inner"
-                  : voiceRecording
-                    ? "bg-ink text-white shadow-inner animate-pulse"
+                  : voiceActive
+                    ? "bg-ink text-white shadow-inner"
                     : "bg-muted/50 text-ink hover:bg-muted active:scale-[0.99]"
               } disabled:opacity-40`}
             >
-              <Mic
-                className={`h-4 w-4 ${voiceRecording && !voiceCancelHint ? "animate-bounce" : ""} ${voiceCancelHint ? "hidden" : ""}`}
-              />
+              {voiceActive && !voiceCancelHint ? <EqualizerBars /> : <Mic className="h-4 w-4" />}
               <span className="text-base select-none">
-                {voice.status === "starting" ? (
-                  "连接中…"
-                ) : voiceRecording ? (
+                {voiceActive ? (
                   voiceCancelHint ? (
                     <span className="flex items-center justify-center gap-1.5">
                       <ArrowUp className="h-4 w-4" />
