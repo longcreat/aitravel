@@ -47,6 +47,7 @@ class FakeWebSocket {
 
 class FakeAudioContext {
   static instances: FakeAudioContext[] = [];
+  static lastOptions: AudioContextOptions | null = null;
 
   sampleRate = 16000;
   state = "running";
@@ -58,7 +59,8 @@ class FakeAudioContext {
     onaudioprocess: ((event: { inputBuffer: { getChannelData: () => Float32Array } }) => void) | null;
   } | null = null;
 
-  constructor() {
+  constructor(options?: AudioContextOptions) {
+    FakeAudioContext.lastOptions = options ?? null;
     FakeAudioContext.instances.push(this);
   }
 
@@ -128,6 +130,7 @@ async function pressAndStart(): Promise<Harness> {
 beforeEach(() => {
   FakeWebSocket.instances = [];
   FakeAudioContext.instances = [];
+  FakeAudioContext.lastOptions = null;
   setupBrowserMocks();
 });
 
@@ -145,6 +148,29 @@ describe("useVoiceInput", () => {
     expect(lastSocket().url).toContain("/api/stt/ws");
     expect(lastSocket().url).toContain(`token=${encodeURIComponent(TEST_TOKEN)}`);
     expect(result.current.status).toBe("recording");
+    // 关键：以 16kHz 创建 AudioContext，交给浏览器做带抗混叠的原生重采样
+    expect(FakeAudioContext.lastOptions).toEqual({ sampleRate: 16000 });
+  });
+
+  it("多段识别（松手前/后各一段 completed）累积拼接完整文本", async () => {
+    const { result, resolved } = await pressAndStart();
+
+    // 录音中：第一段完成（VAD/多段场景），不结算只累积
+    act(() => {
+      lastSocket().receive(JSON.stringify({ type: "sentence", text: "帮我查一下天气。", sentence_end: true }));
+    });
+    expect(resolved).not.toHaveBeenCalled();
+
+    act(() => {
+      result.current.release();
+    });
+
+    await act(async () => {
+      lastSocket().receive(JSON.stringify({ type: "sentence", text: "顺便推荐景点。", sentence_end: true }));
+    });
+
+    expect(resolved).toHaveBeenCalledTimes(1);
+    expect(resolved).toHaveBeenCalledWith(expect.any(String), "帮我查一下天气。顺便推荐景点。");
   });
 
   it("建连前的音频帧先暂存，open 后补发", async () => {

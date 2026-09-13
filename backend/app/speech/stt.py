@@ -1,4 +1,13 @@
-"""千问实时语音识别（Qwen-ASR-Realtime / Omni Realtime）双向流式会话封装。"""
+"""千问实时语音识别（Qwen-ASR-Realtime / Omni Realtime）双向流式会话封装。
+
+协议实证结论（对照官方文档 + 实测，2026-09）：
+- Manual 模式（enable_turn_detection=False）是官方为"聊天软件按住说话"设计的模式；
+  录音期间 partial（text+stash）照常流式推送，commit 触发最终 transcript（实测 ~150ms）。
+- session.finished 在最后一次活动后 ~6s 才由服务端下发，因此结束会话不能同步等待它
+  （会白白阻塞 5s+），应在拿到最终 transcript 后直接 close。
+- 每段 transcript 由 conversation.item.input_audio_transcription.completed 下发，
+  多段时必须累积拼接，不能覆盖。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +15,7 @@ import asyncio
 import base64
 import logging
 import os
+import threading
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,11 +66,12 @@ class DashScopeSttSession:
         self._conversation: Any = None
         self._recognizer: Any = None
         self._started = False
-        self._final_text = ""
+        self._final_parts: list[str] = []
         self._latest_text = ""
         self._mode = "omni"  # "omni" | "legacy"
         self._finishing = False
         self._done_sent = False
+        self._final_event = threading.Event()
 
     @property
     def ready(self) -> bool:
@@ -77,18 +88,23 @@ class DashScopeSttSession:
         if clean:
             self._latest_text = clean
             if is_final:
-                self._final_text = clean
+                # 多段识别（VAD 断句/多次 commit）时累积拼接，不能覆盖
+                self._final_parts.append(clean)
+                self._final_event.set()
         self._enqueue({"type": "sentence", "text": text, "sentence_end": is_final})
         # 最终句（.completed）必定先于 session.finished 到达；松手后直接交付，
         # 不必再等服务端 session.finished，大幅降低松手后的等待延迟。
         if is_final and self._finishing:
             self._emit_done()
 
+    def _final_transcript(self) -> str:
+        return "".join(self._final_parts)
+
     def _emit_done(self) -> None:
         if self._done_sent:
             return
         self._done_sent = True
-        text = self._final_text or self._latest_text
+        text = self._final_transcript() or self._latest_text
         self._enqueue({"type": "done", "text": text})
 
     def _on_complete(self) -> None:
@@ -264,7 +280,11 @@ class DashScopeSttSession:
             self._recognizer.send_audio_frame(data)
 
     def finish(self) -> None:
-        """结束识别：通知服务端完成语音识别。"""
+        """结束识别：commit 触发服务端产出最终 transcript，拿到后立即关闭。
+
+        实测 session.finished 恒定在最后活动 ~6s 后才下发，因此不能同步等待
+        end_session（必然超时、白阻塞 5s）；拿到最终结果即可安全关闭连接。
+        """
         self._finishing = True
         if self._mode == "omni" and self._conversation is not None:
             conv, self._conversation = self._conversation, None
@@ -273,11 +293,15 @@ class DashScopeSttSession:
                     conv.commit()
                 except Exception:  # noqa: BLE001
                     pass
-                # 结果已在 .completed 到达时交付（见 _on_text），这里只做会话清理，
-                # 短超时避免松手后长时间阻塞。
-                conv.end_session(timeout=5)
+                # .completed 通常在 commit 后 ~150ms 到达；最多等 2.5s
+                self._final_event.wait(2.5)
+                try:
+                    conv.end_session_async()
+                except Exception:  # noqa: BLE001
+                    pass
+                conv.close()
             except Exception:  # noqa: BLE001
-                _LOGGER.exception("Omni STT end_session failed")
+                _LOGGER.exception("Omni STT finish failed")
         elif self._mode == "legacy" and self._recognizer is not None:
             rec, self._recognizer = self._recognizer, None
             try:

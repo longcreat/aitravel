@@ -91,7 +91,8 @@ function createSession(): VoiceSession {
 }
 
 function partialText(session: VoiceSession): string {
-  return (session.finalText || session.interimText).trim();
+  // finalText 是已完成的段落累积，interimText 是当前段未完成的草稿，拼接兜底
+  return (session.finalText + session.interimText).trim();
 }
 
 export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
@@ -263,13 +264,14 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
         if (message.sentence_end) {
           const clean = text.trim();
           if (clean) {
-            session.finalText = clean;
+            // 多段识别时累积拼接（VAD 断句/多次 commit），不能覆盖
+            session.finalText += clean;
+            session.interimText = "";
           }
           // 松手后的最终句（.completed）已含完整结果，直接结算，不等 done
           if (session.released) {
-            const result = session.finalText || session.interimText.trim();
-            if (result) {
-              settleSession(session, { ok: true, text: result });
+            if (session.finalText) {
+              settleSession(session, { ok: true, text: session.finalText });
             } else {
               settleSession(session, { ok: false, message: null });
             }
@@ -311,8 +313,28 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
           failActive(session, "当前浏览器不支持录音");
           return;
         }
-        const context = new AudioContextCtor();
+        let context: AudioContext;
+        try {
+          // 让浏览器原生重采样到 16kHz（自带抗混叠滤波）；旧环境不支持时退回
+          // 默认采样率 + JS 隔点抽取。手工降采样没有低通，高频会折叠成噪声，
+          // 实测会明显损伤识别准确率（丢字/错字）。
+          context = new AudioContextCtor({ sampleRate: TARGET_SAMPLE_RATE });
+        } catch {
+          context = new AudioContextCtor();
+        }
         session.context = context;
+        if (context.state === "suspended") {
+          // iOS 等浏览器在非手势栈中创建的上下文可能处于 suspended，不会出音频
+          try {
+            await context.resume();
+          } catch {
+            // 继续走下面的 running 校验
+          }
+        }
+        if (context.state !== "running") {
+          failActive(session, "麦克风初始化失败，请重试");
+          return;
+        }
         const source = context.createMediaStreamSource(stream);
         session.source = source;
         const processor = context.createScriptProcessor(1024, 1, 1);
