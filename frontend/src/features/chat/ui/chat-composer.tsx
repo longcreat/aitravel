@@ -227,15 +227,21 @@ export function ChatComposer({
               onPointerMove={handleVoicePointerMove}
               onPointerUp={handleVoicePointerUp}
               onPointerCancel={handleVoicePointerCancel}
-              className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 font-medium transition-colors duration-150 select-none touch-none ${
+              className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg border px-4 font-medium transition-colors duration-150 select-none touch-none ${
                 voiceCancelHint
-                  ? "bg-[#b95a46] text-white shadow-inner"
+                  ? "bg-[#fff1ee] border-[#f3d8d0] text-[#b95a46]"
                   : voiceActive
-                    ? "bg-ink text-white shadow-inner"
-                    : "bg-muted/50 text-ink hover:bg-muted active:scale-[0.99]"
+                    ? "bg-[#f5ede4] border-[#e8d5c4] text-ink shadow-sm"
+                    : "bg-muted/50 border-transparent text-ink hover:bg-muted active:scale-[0.99]"
               } disabled:opacity-40`}
             >
-              {voiceActive && !voiceCancelHint ? <EqualizerBars /> : <Mic className="h-4 w-4" />}
+              {voiceActive && !voiceCancelHint ? (
+                <span className="text-mint">
+                  <EqualizerBars />
+                </span>
+              ) : (
+                <Mic className="h-4 w-4" />
+              )}
               <span className="text-base select-none">
                 {voiceActive ? (
                   voiceCancelHint ? (
@@ -244,7 +250,7 @@ export function ChatComposer({
                       松开取消
                     </span>
                   ) : (
-                    "正在聆听，松开发送…"
+                    "松开发送"
                   )
                 ) : voice.error ? (
                   <span className="text-xs text-rose-500" role="alert">
