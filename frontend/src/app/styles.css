@@ -141,10 +141,10 @@ textarea {
   animation: typing-bounce 1.2s ease-in-out infinite;
 }
 
-/* 语音录制均衡器竖条（chat-composer 录音态） */
+/* 语音录制声波竖条（chat-composer 录音/取消态，白色，置于彩色 bar 上） */
 @keyframes voice-eq {
   0%, 100% {
-    transform: scaleY(0.3);
+    transform: scaleY(0.35);
   }
   50% {
     transform: scaleY(1);
@@ -154,7 +154,6 @@ textarea {
 .voice-eq-bar {
   display: inline-block;
   width: 3px;
-  height: 14px;
   border-radius: 9999px;
   background-color: currentColor;
   transform-origin: center;

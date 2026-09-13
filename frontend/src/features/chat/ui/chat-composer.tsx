@@ -19,12 +19,22 @@ interface ChatComposerProps {
   onStop: () => void;
 }
 
-/** 录音态均衡器竖条：4 根错相位跳动（纯 CSS 动画） */
-function EqualizerBars() {
+/** 录音态声波竖条：预设对称波形 + 错相位跳动（纯 CSS 动画） */
+const WAVE_HEIGHTS = [5, 9, 14, 8, 18, 12, 24, 16, 28, 20, 30, 22, 26, 15, 21, 10, 17, 8, 13, 6, 10, 5];
+
+function Waveform() {
   return (
-    <span className="flex items-center gap-[3px]" aria-hidden="true">
-      {[0, 120, 240, 360].map((delay) => (
-        <span key={delay} className="voice-eq-bar" style={{ animationDelay: `${delay}ms` }} />
+    <span className="flex h-[30px] items-center gap-[3px]" aria-hidden="true">
+      {WAVE_HEIGHTS.map((height, index) => (
+        <span
+          key={index}
+          className="voice-eq-bar"
+          style={{
+            height,
+            animationDelay: `${index * 90}ms`,
+            animationDuration: `${0.7 + (index % 5) * 0.12}s`,
+          }}
+        />
       ))}
     </span>
   );
@@ -218,49 +228,49 @@ export function ChatComposer({
           </div>
         ) : (
           <div className="fade-up flex min-h-[52px] items-center gap-2 rounded-xl bg-white px-2 shadow-[0_4px_24px_-4px_rgba(0,0,0,0.06),0_2px_8px_-2px_rgba(0,0,0,0.03)] transition-all">
-            <button
-              type="button"
-              aria-label="push-to-talk"
-              disabled={!ready}
-              onContextMenu={(e) => e.preventDefault()}
-              onPointerDown={handleVoicePointerDown}
-              onPointerMove={handleVoicePointerMove}
-              onPointerUp={handleVoicePointerUp}
-              onPointerCancel={handleVoicePointerCancel}
-              className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg border px-4 font-medium transition-colors duration-150 select-none touch-none ${
-                voiceCancelHint
-                  ? "bg-[#fff1ee] border-[#f3d8d0] text-[#b95a46]"
-                  : voiceActive
-                    ? "bg-[#f5ede4] border-[#e8d5c4] text-ink shadow-sm"
-                    : "bg-muted/50 border-transparent text-ink hover:bg-muted active:scale-[0.99]"
-              } disabled:opacity-40`}
-            >
-              {voiceActive && !voiceCancelHint ? (
-                <span className="text-mint">
-                  <EqualizerBars />
-                </span>
-              ) : (
-                <Mic className="h-4 w-4" />
-              )}
-              <span className="text-base select-none">
+            <div className="flex min-w-0 flex-1 flex-col">
+              {voiceActive ? (
+                <p
+                  className={`mb-1.5 text-center text-[13px] leading-none ${
+                    voiceCancelHint ? "text-[#b95a46]" : "text-[#a29f98]"
+                  }`}
+                >
+                  {voiceCancelHint ? "松开取消" : "松开发送，上移取消"}
+                </p>
+              ) : null}
+              <button
+                type="button"
+                aria-label="push-to-talk"
+                disabled={!ready}
+                onContextMenu={(e) => e.preventDefault()}
+                onPointerDown={handleVoicePointerDown}
+                onPointerMove={handleVoicePointerMove}
+                onPointerUp={handleVoicePointerUp}
+                onPointerCancel={handleVoicePointerCancel}
+                className={`flex min-h-[44px] w-full items-center justify-center rounded-xl border px-4 transition-colors duration-150 select-none touch-none ${
+                  voiceCancelHint
+                    ? "bg-[#fff1ee] border-[#f3d8d0]"
+                    : voiceActive
+                      ? "bg-[#f5ede4] border-[#e8d5c4] shadow-sm"
+                      : "bg-muted/50 border-transparent hover:bg-muted active:scale-[0.99]"
+                } disabled:opacity-40`}
+              >
                 {voiceActive ? (
-                  voiceCancelHint ? (
-                    <span className="flex items-center justify-center gap-1.5">
-                      <ArrowUp className="h-4 w-4" />
-                      松开取消
-                    </span>
-                  ) : (
-                    "松开发送"
-                  )
+                  <span className={voiceCancelHint ? "text-[#b95a46]" : "text-mint"}>
+                    <Waveform />
+                  </span>
                 ) : voice.error ? (
                   <span className="text-xs text-rose-500" role="alert">
                     {voice.error}
                   </span>
                 ) : (
-                  "按住 说话"
+                  <span className="flex items-center gap-2 text-base text-ink">
+                    <Mic className="h-4 w-4" />
+                    按住 说话
+                  </span>
                 )}
-              </span>
-            </button>
+              </button>
+            </div>
             <Button
               type="button"
               size="icon"
