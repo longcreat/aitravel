@@ -110,7 +110,12 @@ async function pressAndStart(): Promise<Harness> {
   const resolved = vi.fn();
   const failed = vi.fn();
   const { result } = renderHook(() =>
-    useVoiceInput({ onUtteranceStarted: started, onUtteranceResolved: resolved, onUtteranceFailed: failed }),
+    useVoiceInput({
+      onUtteranceStarted: started,
+      onUtteranceResolved: resolved,
+      onUtteranceFailed: failed,
+      minRecordMs: 0, // 默认用例关闭误触保护，单独用例再测保护行为
+    }),
   );
 
   // getUserMedia mock 在微任务中解析；让出两个微任务后音频管线同步完成并置为 recording。
@@ -271,25 +276,54 @@ describe("useVoiceInput", () => {
     expect(resolved).toHaveBeenCalledWith(expect.any(String), "帮我规划行程");
   });
 
-  it("极快点击：松手时建连未完成，open 后自动补发 finish", async () => {
+  it("极快点击：管线未就绪就松手，按误触丢弃且不补发 finish", async () => {
+    const started = vi.fn();
+    const failed = vi.fn();
     const { result } = renderHook(() =>
-      useVoiceInput({ onUtteranceStarted: vi.fn(), onUtteranceResolved: vi.fn(), onUtteranceFailed: vi.fn() }),
+      useVoiceInput({ onUtteranceStarted: started, onUtteranceResolved: vi.fn(), onUtteranceFailed: failed }),
     );
 
     await act(async () => {
       result.current.press();
       await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
-      // 管线未就绪、WS 未 open 时就松手
+      // 管线未就绪、WS 未 open 时就松手 —— 典型误触
       result.current.release();
     });
 
     expect(result.current.status).toBe("idle");
-    expect(lastSocket().finishActionSent()).toBe(false);
+    expect(started).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenCalledWith(expect.any(String), "说话时间太短，请按住后讲话");
 
     await act(async () => {
       lastSocket().open();
-      await vi.waitFor(() => expect(lastSocket().finishActionSent()).toBe(true));
     });
+    // 会话已被丢弃：连接打开后也不补发 finish
+    expect(lastSocket().finishActionSent()).toBe(false);
+  });
+
+  it("录音时长不足最短阈值时按误触丢弃", async () => {
+    const started = vi.fn();
+    const resolved = vi.fn();
+    const failed = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput({ onUtteranceStarted: started, onUtteranceResolved: resolved, onUtteranceFailed: failed }),
+    );
+
+    await act(async () => {
+      result.current.press();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // attach 已完成（status=recording，recordingStartedAt 刚设置），立刻松手：
+    // 实际录音时长 ≈ 0ms，远低于 350ms 阈值
+    act(() => {
+      result.current.release();
+    });
+
+    expect(result.current.status).toBe("idle");
+    expect(started).not.toHaveBeenCalled();
+    expect(resolved).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenCalledWith(expect.any(String), "说话时间太短，请按住后讲话");
   });
 
   it("上滑取消：直接丢弃会话，不产生任何话语回调", async () => {

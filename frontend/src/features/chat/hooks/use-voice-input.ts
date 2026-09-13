@@ -11,6 +11,8 @@ const RESOLVE_TIMEOUT_MS = 5000;
 const SILENCE_PEAK_THRESHOLD = 0.002;
 /** 未识别到任何内容时的提示 */
 const EMPTY_TRANSCRIPT_MESSAGE = "未识别到内容，请重试";
+/** 默认最短有效录音时长：低于它的松手视为误触，丢弃避免把瞬态噪声识别成"嗯" */
+const DEFAULT_MIN_RECORD_MS = 350;
 
 export type VoiceStatus = "idle" | "starting" | "recording";
 
@@ -21,6 +23,8 @@ export interface VoiceInputOptions {
   onUtteranceResolved: (id: string, text: string) => void;
   /** 未识别到内容（message 为 null，静默）或识别失败（message 非空，提示用户） */
   onUtteranceFailed: (id: string, message: string | null) => void;
+  /** 最短有效录音时长（毫秒），低于视为误触直接丢弃；测试可置 0 */
+  minRecordMs?: number;
 }
 
 export interface VoiceInput {
@@ -47,6 +51,8 @@ interface VoiceSession {
   released: boolean;
   settled: boolean;
   resolveTimer: number | null;
+  /** 管线就绪（真正开始采集音频）的时刻，用于误触时长判定；0 = 尚未就绪 */
+  recordingStartedAt: number;
   /** 采集静音自愈：帧统计与回退标记 */
   audioFrames: number;
   silentFrames: number;
@@ -96,6 +102,7 @@ function createSession(): VoiceSession {
     released: false,
     settled: false,
     resolveTimer: null,
+    recordingStartedAt: 0,
     audioFrames: 0,
     silentFrames: 0,
     degradedRetryDone: false,
@@ -409,6 +416,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
         if (currentRef.current === session) {
           setStatus("recording");
         }
+        session.recordingStartedAt = Date.now();
         if (session.released) {
           // 极快点击：松手时管线尚未就绪，就绪后立即补发 finish
           flushAudio(session);
@@ -522,6 +530,19 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
   const release = useCallback(() => {
     const session = currentRef.current;
     if (!session || session.settled) {
+      return;
+    }
+    // 误触保护：管线未就绪或实际录音时长过短（快速点按）直接丢弃。
+    // 开启麦克风的瞬态噪声会被 ASR 幻听成"嗯"之类的语气词，不能让它发出去。
+    const minRecordMs = optionsRef.current.minRecordMs ?? DEFAULT_MIN_RECORD_MS;
+    const recordedMs = session.recordingStartedAt ? Date.now() - session.recordingStartedAt : 0;
+    if (recordedMs < minRecordMs) {
+      session.settled = true;
+      teardownSession(session);
+      currentRef.current = null;
+      setStatus("idle");
+      setInterimText("");
+      optionsRef.current.onUtteranceFailed(`tap-${session.id}`, "说话时间太短，请按住后讲话");
       return;
     }
     currentRef.current = null;
