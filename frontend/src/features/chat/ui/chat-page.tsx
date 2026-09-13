@@ -6,16 +6,18 @@ import { useAuth } from "@/features/auth/model/auth.context";
 import { getAssistantSpeechPlaybackUrl } from "@/features/chat/api/chat.api";
 import type { ChatMessageItem, SessionSummary } from "@/features/chat/model/chat.types";
 import { useChatAgent } from "@/features/chat/hooks/use-chat-agent";
+import { useVoiceInput } from "@/features/chat/hooks/use-voice-input";
+import { useVoiceUtterances } from "@/features/chat/hooks/use-voice-utterances";
 import { ChatComposer } from "@/features/chat/ui/chat-composer";
 import { ChatMessage } from "@/features/chat/ui/chat-message";
 import { HttpError } from "@/shared/lib/http";
 import { BrowserProvider, useBrowser } from "@/shared/lib/browser";
-import { 
+import {
   AppSurfaceSheet,
-  Button, 
-  DropdownMenu, 
-  DropdownMenuContent, 
-  DropdownMenuItem, 
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuTrigger,
   Dialog,
   DialogContent,
@@ -25,6 +27,7 @@ import {
   DialogFooter,
   Input,
   InAppBrowserSheet,
+  toast,
 } from "@/shared/ui";
 interface SessionGroup {
   label: "今日" | "7日" | "30日" | "更早";
@@ -179,9 +182,24 @@ function ChatPageInner() {
   const [renameInput, setRenameInput] = useState("");
   const [modelProfileSheetOpen, setModelProfileSheetOpen] = useState(false);
   const [playingSpeechKey, setPlayingSpeechKey] = useState<string | null>(null);
-  // 语音松手后转写未完成的等待态：null = 无等待，字符串 = 等待中已识别的文本
-  const [voicePendingText, setVoicePendingText] = useState<string | null>(null);
   const { url: browserUrl, close: closeBrowser } = useBrowser();
+
+  const voiceUtterances = useVoiceUtterances({
+    threadId,
+    loading,
+    ready: authReady,
+    sendMessage,
+    onFailed: (message) => {
+      if (message) {
+        toast({ description: message });
+      }
+    },
+  });
+  const voice = useVoiceInput({
+    onUtteranceStarted: voiceUtterances.started,
+    onUtteranceResolved: voiceUtterances.resolved,
+    onUtteranceFailed: voiceUtterances.failed,
+  });
   
   const listRef = useRef<HTMLDivElement | null>(null);
   const pendingNewThreadIdRef = useRef<string | null>(null);
@@ -203,7 +221,7 @@ function ChatPageInner() {
       return;
     }
     node.scrollTop = node.scrollHeight;
-  }, [messages, loading, voicePendingText]);
+  }, [messages, loading, voiceUtterances.pendingIds.length]);
 
   const stopSpeechPlayback = useCallback(() => {
     const activeAudio = activeAudioRef.current;
@@ -656,22 +674,19 @@ function ChatPageInner() {
           />
         ))}
 
-        {voicePendingText !== null ? (
-          <div className="fade-up flex px-4">
+        {voiceUtterances.pendingIds.map((pendingId) => (
+          <div key={pendingId} className="fade-up flex px-4">
             <div className="flex w-full flex-col items-end">
-              {voicePendingText ? (
-                <div className="max-w-[90%] rounded-xl border border-[#e8d5c4] bg-[#f5ede4] px-5 py-2.5 text-base leading-relaxed break-words text-[#2c2b28] shadow-sm">
-                  {voicePendingText}
+              <div className="max-w-[90%] rounded-xl border border-[#e8d5c4] bg-[#f5ede4] px-5 py-3.5 text-[#2c2b28] shadow-sm">
+                <div className="flex items-center gap-1.5">
+                  <span className="typing-dot" style={{ animationDelay: "0ms" }} />
+                  <span className="typing-dot" style={{ animationDelay: "160ms" }} />
+                  <span className="typing-dot" style={{ animationDelay: "320ms" }} />
                 </div>
-              ) : null}
-              <div className="flex items-center gap-1.5 px-2 py-1">
-                <span className="typing-dot" style={{ animationDelay: "0ms" }} />
-                <span className="typing-dot" style={{ animationDelay: "160ms" }} />
-                <span className="typing-dot" style={{ animationDelay: "320ms" }} />
               </div>
             </div>
           </div>
-        ) : null}
+        ))}
 
       </section>
 
@@ -679,10 +694,10 @@ function ChatPageInner() {
         loading={loading}
         ready={authReady}
         modelProfileLabel={selectedModelProfileLabel}
+        voice={voice}
         onSend={sendMessage}
         onOpenModelProfileSheet={() => setModelProfileSheetOpen(true)}
         onStop={stopGenerating}
-        onVoicePendingChange={setVoicePendingText}
       />
 
       <AppSurfaceSheet

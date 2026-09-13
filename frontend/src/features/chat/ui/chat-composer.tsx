@@ -1,20 +1,22 @@
-import { ArrowUp, Brain, ChevronDown, Keyboard, LoaderCircle, Mic, Square } from "lucide-react";
-import { FormEvent, useState, useRef, useEffect } from "react";
+import { ArrowUp, Brain, ChevronDown, Keyboard, Mic, Square } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
 import type { SendIntentResult } from "@/features/chat/model/chat.types";
-import { usePushToTalk } from "@/features/chat/hooks/use-push-to-talk";
+import type { VoiceInput } from "@/features/chat/hooks/use-voice-input";
 import { Button } from "@/shared/ui";
+
+/** 手指上滑超出输入条顶部该距离后，松手即取消 */
+const SLIDE_CANCEL_THRESHOLD_PX = 12;
 
 interface ChatComposerProps {
   loading: boolean;
   ready: boolean;
   modelProfileLabel: string;
   placeholder?: string;
+  voice: VoiceInput;
   onSend: (message: string) => Promise<SendIntentResult>;
   onOpenModelProfileSheet: () => void;
   onStop: () => void;
-  /** 松手后转写未完成的等待态上报：null = 无等待，字符串 = 等待中已识别的文本 */
-  onVoicePendingChange?: (pendingText: string | null) => void;
 }
 
 export function ChatComposer({
@@ -22,43 +24,21 @@ export function ChatComposer({
   ready,
   modelProfileLabel,
   placeholder = "发消息或按住说话",
+  voice,
   onSend,
   onOpenModelProfileSheet,
   onStop,
-  onVoicePendingChange,
 }: ChatComposerProps) {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<"text" | "voice">("text");
-  const [voiceText, setVoiceText] = useState("");
+  const [cancelArmed, setCancelArmed] = useState(false);
+  const cancelArmedRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const {
-    recording,
-    finalizing,
-    interimText,
-    error: sttError,
-    start: startRecording,
-    finish: finishRecording,
-    cancel: cancelRecording,
-  } = usePushToTalk({
-    onInterim: (text) => setVoiceText(text),
-    onFinal: (text) => {
-      if (!loading && ready) {
-        void onSend(text);
-      } else {
-        // 极端时序下发送通道被占用时不丢字，退回输入框让用户手动发送
-        setMode("text");
-        setValue(text);
-      }
-    },
-    onError: () => setVoiceText(""),
-  });
-
-  // 松手后转写尚未完成时，把等待态上报给聊天区展示加载动画；
-  // 非等待期间的 interim 更新上报 null（相同值不会触发父组件重渲染）。
-  useEffect(() => {
-    onVoicePendingChange?.(finalizing ? interimText : null);
-  }, [finalizing, interimText, onVoicePendingChange]);
+  const setArmed = (next: boolean) => {
+    cancelArmedRef.current = next;
+    setCancelArmed(next);
+  };
 
   useEffect(() => {
     if (value === "" && textareaRef.current) {
@@ -82,16 +62,62 @@ export function ChatComposer({
 
   function switchToVoice() {
     setMode("voice");
-    setVoiceText("");
   }
 
   function switchToText() {
-    if (recording) {
-      cancelRecording();
+    if (voice.status !== "idle") {
+      voice.cancel();
     }
     setMode("text");
-    setVoiceText("");
   }
+
+  function handleVoicePointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // 某些老旧环境不支持 setPointerCapture
+    }
+    setArmed(false);
+    voice.press();
+  }
+
+  function handleVoicePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (voice.status !== "recording" && voice.status !== "starting") {
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const above = event.clientY < rect.top - SLIDE_CANCEL_THRESHOLD_PX;
+    if (cancelArmedRef.current !== above) {
+      setArmed(above);
+    }
+  }
+
+  function handleVoicePointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // 忽略捕获释放错误
+    }
+    if (cancelArmedRef.current) {
+      voice.cancel();
+    } else {
+      voice.release();
+    }
+    setArmed(false);
+  }
+
+  function handleVoicePointerCancel(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    voice.cancel();
+    setArmed(false);
+  }
+
+  const voiceRecording = voice.status === "recording";
+  const voiceCancelHint = voiceRecording && cancelArmed;
 
   return (
     <form
@@ -183,50 +209,38 @@ export function ChatComposer({
             <button
               type="button"
               aria-label="push-to-talk"
-              disabled={!ready || loading || finalizing}
+              disabled={!ready}
               onContextMenu={(e) => e.preventDefault()}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                try {
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                } catch {
-                  // 某些老旧环境不支持 setPointerCapture
-                }
-                startRecording();
-              }}
-              onPointerUp={(event) => {
-                event.preventDefault();
-                try {
-                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                    event.currentTarget.releasePointerCapture(event.pointerId);
-                  }
-                } catch {
-                  // 忽略捕获释放错误
-                }
-                finishRecording();
-              }}
-              onPointerCancel={(event) => {
-                event.preventDefault();
-                finishRecording();
-              }}
+              onPointerDown={handleVoicePointerDown}
+              onPointerMove={handleVoicePointerMove}
+              onPointerUp={handleVoicePointerUp}
+              onPointerCancel={handleVoicePointerCancel}
               className={`flex flex-1 min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 font-medium transition-all select-none touch-none ${
-                recording
-                  ? "bg-ink text-white shadow-inner animate-pulse"
-                  : "bg-muted/50 text-ink hover:bg-muted active:scale-[0.99]"
+                voiceCancelHint
+                  ? "bg-[#b95a46] text-white shadow-inner"
+                  : voiceRecording
+                    ? "bg-ink text-white shadow-inner animate-pulse"
+                    : "bg-muted/50 text-ink hover:bg-muted active:scale-[0.99]"
               } disabled:opacity-40`}
             >
-              <Mic className={`h-4 w-4 ${recording ? "animate-bounce" : ""}`} />
+              <Mic
+                className={`h-4 w-4 ${voiceRecording && !voiceCancelHint ? "animate-bounce" : ""} ${voiceCancelHint ? "hidden" : ""}`}
+              />
               <span className="text-base select-none">
-                {recording ? (
-                  interimText || "正在聆听，松开发送…"
-                ) : finalizing ? (
-                  <span className="flex items-center justify-center gap-2 text-[#7a766d]">
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                    语音识别中…
-                  </span>
-                ) : sttError ? (
+                {voice.status === "starting" ? (
+                  "连接中…"
+                ) : voiceRecording ? (
+                  voiceCancelHint ? (
+                    <span className="flex items-center justify-center gap-1.5">
+                      <ArrowUp className="h-4 w-4" />
+                      松开取消
+                    </span>
+                  ) : (
+                    voice.interimText || "正在聆听，松开发送…"
+                  )
+                ) : voice.error ? (
                   <span className="text-xs text-rose-500" role="alert">
-                    {sttError}
+                    {voice.error}
                   </span>
                 ) : (
                   "按住 说话"
