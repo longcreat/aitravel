@@ -236,7 +236,7 @@ export function ChatComposer({
                       松开取消
                     </span>
                   ) : (
-                    voice.interimText || "正在聆听，松开发送…"
+                    "正在聆听，松开发送…"
                   )
                 ) : voice.error ? (
                   <span className="text-xs text-rose-500" role="alert">
