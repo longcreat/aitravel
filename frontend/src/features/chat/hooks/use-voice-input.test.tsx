@@ -421,6 +421,52 @@ describe("useVoiceInput", () => {
     expect(failed).not.toHaveBeenCalled();
   });
 
+  it("近零抖动静音流（噪声抑制残留）同样触发自愈回退", async () => {
+    vi.useFakeTimers();
+    const { result } = await pressAndStart();
+    const context = FakeAudioContext.instances[0];
+
+    act(() => {
+      // 0.0001 远低于健康底噪阈值，但不是纯零 —— 旧的 ===0 判定会漏掉
+      context.emitAudio(new Float32Array(1024).fill(0.0001));
+      context.emitAudio(new Float32Array(1024).fill(0.0001));
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(FakeAudioContext.instances.length).toBe(2);
+    expect(result.current.status).toBe("recording");
+  });
+
+  it("松手后空转写不再静默吞掉，返回明确提示", async () => {
+    const { result, resolved, failed } = await pressAndStart();
+
+    await act(async () => {
+      result.current.release();
+      // 服务端对纯静音音频返回空 transcript 的最终句
+      lastSocket().receive(JSON.stringify({ type: "sentence", text: "", sentence_end: true }));
+    });
+
+    expect(result.current.status).toBe("idle");
+    expect(resolved).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenCalledWith(expect.any(String), "未识别到内容，请重试");
+  });
+
+  it("done 事件为空文本时同样返回明确提示", async () => {
+    const { result, resolved, failed } = await pressAndStart();
+
+    await act(async () => {
+      result.current.release();
+      lastSocket().receive(JSON.stringify({ type: "done", text: "" }));
+    });
+
+    expect(result.current.status).toBe("idle");
+    expect(resolved).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenCalledWith(expect.any(String), "未识别到内容，请重试");
+  });
+
   it("采集到正常声音时不触发静音回退", async () => {
     vi.useFakeTimers();
     const { result } = await pressAndStart();

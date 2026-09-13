@@ -7,6 +7,10 @@ const TARGET_SAMPLE_RATE = 16000;
 const AUDIO_CONTEXT_OPTIONS = { audio: { echoCancellation: true, noiseSuppression: true } };
 /** 松手后等待最终转写结果的兜底超时；超时用已识别的部分文本交付 */
 const RESOLVE_TIMEOUT_MS = 5000;
+/** 采集健康判定阈值（约 -54dBFS）：低于它视为静音帧；正常房间底噪/语音都远高于此 */
+const SILENCE_PEAK_THRESHOLD = 0.002;
+/** 未识别到任何内容时的提示 */
+const EMPTY_TRANSCRIPT_MESSAGE = "未识别到内容，请重试";
 
 export type VoiceStatus = "idle" | "starting" | "recording";
 
@@ -286,7 +290,8 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
             if (session.finalText) {
               settleSession(session, { ok: true, text: session.finalText });
             } else {
-              settleSession(session, { ok: false, message: null });
+              // 空转写不能静默吞掉（气泡会无声消失），给出明确提示
+              settleSession(session, { ok: false, message: EMPTY_TRANSCRIPT_MESSAGE });
             }
           }
         } else if (text.trim()) {
@@ -301,7 +306,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
         if (text) {
           settleSession(session, { ok: true, text });
         } else {
-          settleSession(session, { ok: false, message: null });
+          settleSession(session, { ok: false, message: EMPTY_TRANSCRIPT_MESSAGE });
         }
       } else if (message.type === "error") {
         abortWithError(session, String(message.message ?? "语音识别失败"));
@@ -353,7 +358,8 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
           return;
         }
         const input = event.inputBuffer.getChannelData(0);
-        // 采集能量统计：Chrome 在部分设备上对非原生采样率 context 会输出全零静音流
+        // 采集能量统计：Chrome 在部分设备上对非原生采样率 context 会输出近零静音流
+        // （噪声抑制电路常留微小抖动，不是纯零，必须用阈值判定而非 ===0）
         session.audioFrames += 1;
         let peak = 0;
         for (let i = 0; i < input.length; i += 1) {
@@ -362,7 +368,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
             peak = value;
           }
         }
-        if (peak === 0) {
+        if (peak < SILENCE_PEAK_THRESHOLD) {
           session.silentFrames += 1;
         }
         const pcm = pcm16Encode(input, context.sampleRate);
@@ -408,14 +414,14 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
           flushAudio(session);
           sendFinish(session);
         }
-        // 采集静音自愈：Chrome 部分设备上 16kHz context 的麦克风输入是全零静音流
-        // （间歇性发作，表现为"发出去没内容"），检测到后拆掉管线、用默认采样率
-        // + JS 降采样重建，用户无感。
+        // 采集静音自愈：Chrome 部分设备上 16kHz context 的麦克风输入是近零静音流
+        // （表现为"发出去没内容"），检测到后拆掉管线、用默认采样率 + JS 降采样
+        // 重建，用户无感。
         session.silenceCheckTimer = window.setTimeout(() => {
           if (session.settled || session.degradedRetryDone) {
             return;
           }
-          // 还没有任何音频帧，或已有非静音帧 → 采集正常
+          // 还没有任何音频帧，或已出现健康帧（底噪/语音都高于阈值）→ 采集正常
           if (session.audioFrames === 0 || session.silentFrames < session.audioFrames) {
             return;
           }
@@ -424,6 +430,10 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
             return;
           }
           session.degradedRetryDone = true;
+          // 诊断线索：确认自愈触发情况
+          console.warn(
+            `[voice] 16kHz 采集静音(帧=${session.audioFrames})，回退默认采样率重建管线`,
+          );
           // 只拆音频管线，保留 stream 与会话状态
           const processor = session.processor;
           session.processor = null;
