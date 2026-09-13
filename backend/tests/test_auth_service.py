@@ -13,6 +13,8 @@ from app.auth.service import AuthService
 def _set_base_env(monkeypatch, db_path: Path, port: str) -> None:
     monkeypatch.setenv("CHAT_SQLITE_PATH", str(db_path))
     monkeypatch.setenv("JWT_SECRET", "test-secret-for-auth-service-0123456789")
+    # 显式关闭邮件 Mock：本地 .env 可能设置了 DEV_MOCK_SMTP=true 并经 load_dotenv 泄入测试进程
+    monkeypatch.setenv("DEV_MOCK_SMTP", "false")
     monkeypatch.setenv("SMTP_HOST", "smtp.test.local")
     monkeypatch.setenv("SMTP_PORT", port)
     monkeypatch.setenv("SMTP_USERNAME", "demo@example.com")

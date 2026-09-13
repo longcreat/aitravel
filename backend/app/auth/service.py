@@ -209,6 +209,19 @@ class AuthService:
 """
 
     def _send_email(self, *, email: str, code: str, purpose: AuthPurpose) -> None:
+        if os.getenv("DEV_MOCK_SMTP", "false").strip().lower() == "true":
+            _LOGGER.warning(
+                "\n"
+                "==================================================\n"
+                "  [DEV MOCK] 验证码发送 Mock (未实际发送邮件):\n"
+                "  接收邮箱: %s\n"
+                "  验证码: %s\n"
+                "==================================================\n",
+                email,
+                code,
+            )
+            return
+
         if self._smtp_settings is None:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

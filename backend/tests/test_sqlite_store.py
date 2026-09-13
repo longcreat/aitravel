@@ -6,6 +6,7 @@ import pytest
 
 from app.auth.store import AuthSQLiteStore
 from app.db.bootstrap import bootstrap_sqlite_database, run_sqlite_migrations
+from app.db.bootstrap import _discover_migrations
 from app.memory.sqlite_store import ChatSQLiteStore
 
 
@@ -136,7 +137,9 @@ def test_sqlite_store_bootstraps_from_versioned_schema(tmp_path: Path) -> None:
     assert applied_initial == [1]
 
     applied_remaining = run_sqlite_migrations(db_path)
-    assert applied_remaining == [2, 3, 4, 5, 6]
+    # 不写死版本号：与生产迁移发现逻辑保持一致，避免新增迁移后断言过期
+    expected_versions = [migration.version for migration in _discover_migrations()]
+    assert applied_remaining == [version for version in expected_versions if version != 1]
 
     store = ChatSQLiteStore(db_path)
     auth_store = AuthSQLiteStore(db_path)
