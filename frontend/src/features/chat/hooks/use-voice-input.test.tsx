@@ -391,6 +391,52 @@ describe("useVoiceInput", () => {
     expect(result.current.error).toContain("登录");
   });
 
+  it("16kHz 采集全零静音流时自动回退默认采样率重建管线", async () => {
+    vi.useFakeTimers();
+    const { result, resolved, failed } = await pressAndStart();
+    const context = FakeAudioContext.instances[0];
+
+    act(() => {
+      // 连续送入全零帧，模拟 Chrome 非原生采样率静音 bug
+      context.emitAudio(new Float32Array(1024));
+      context.emitAudio(new Float32Array(1024));
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    // 旧管线被拆掉，用默认采样率重建了第二个 context，会话仍然存活
+    expect(FakeAudioContext.instances.length).toBe(2);
+    expect(result.current.status).toBe("recording");
+
+    await act(async () => {
+      FakeAudioContext.instances[1].emitAudio(new Float32Array(1024).fill(0.5));
+      lastSocket().receive(JSON.stringify({ type: "sentence", text: "帮我查天气", sentence_end: false }));
+      result.current.release();
+      lastSocket().receive(JSON.stringify({ type: "sentence", text: "帮我查天气", sentence_end: true }));
+    });
+
+    expect(resolved).toHaveBeenCalledWith(expect.any(String), "帮我查天气");
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it("采集到正常声音时不触发静音回退", async () => {
+    vi.useFakeTimers();
+    const { result } = await pressAndStart();
+
+    act(() => {
+      FakeAudioContext.instances[0].emitAudio(new Float32Array(1024).fill(0.5));
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(FakeAudioContext.instances.length).toBe(1);
+    expect(result.current.status).toBe("recording");
+  });
+
   it("连说两句：松手后可立即再次 press 建立新会话", async () => {
     const { result, started } = await pressAndStart();
 

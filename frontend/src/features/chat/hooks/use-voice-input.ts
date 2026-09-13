@@ -43,6 +43,11 @@ interface VoiceSession {
   released: boolean;
   settled: boolean;
   resolveTimer: number | null;
+  /** 采集静音自愈：帧统计与回退标记 */
+  audioFrames: number;
+  silentFrames: number;
+  degradedRetryDone: boolean;
+  silenceCheckTimer: number | null;
 }
 
 function resolveVoiceWsUrl(): string {
@@ -87,6 +92,10 @@ function createSession(): VoiceSession {
     released: false,
     settled: false,
     resolveTimer: null,
+    audioFrames: 0,
+    silentFrames: 0,
+    degradedRetryDone: false,
+    silenceCheckTimer: null,
   };
 }
 
@@ -111,6 +120,10 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
     if (session.resolveTimer !== null) {
       window.clearTimeout(session.resolveTimer);
       session.resolveTimer = null;
+    }
+    if (session.silenceCheckTimer !== null) {
+      window.clearTimeout(session.silenceCheckTimer);
+      session.silenceCheckTimer = null;
     }
     const socket = session.socket;
     session.socket = null;
@@ -297,6 +310,82 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
     [abortWithError, settleSession],
   );
 
+  const attachAudioCapture = useCallback(
+    async (session: VoiceSession, stream: MediaStream, prefer16k: boolean): Promise<boolean> => {
+      const AudioContextCtor =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) {
+        abortWithError(session, "当前浏览器不支持录音");
+        return false;
+      }
+      let context: AudioContext;
+      if (prefer16k) {
+        try {
+          // 让浏览器原生重采样到 16kHz（自带抗混叠滤波）；旧环境不支持时退回
+          // 默认采样率 + JS 隔点抽取。手工降采样没有低通，高频会折叠成噪声，
+          // 实测会明显损伤识别准确率（丢字/错字）。
+          context = new AudioContextCtor({ sampleRate: TARGET_SAMPLE_RATE });
+        } catch {
+          context = new AudioContextCtor();
+        }
+      } else {
+        context = new AudioContextCtor();
+      }
+      session.context = context;
+      if (context.state === "suspended") {
+        // iOS 等浏览器在非手势栈中创建的上下文可能处于 suspended，不会出音频
+        try {
+          await context.resume();
+        } catch {
+          // 继续走下面的 running 校验
+        }
+      }
+      if (context.state !== "running") {
+        return false;
+      }
+      const source = context.createMediaStreamSource(stream);
+      session.source = source;
+      const processor = context.createScriptProcessor(1024, 1, 1);
+      session.processor = processor;
+      processor.onaudioprocess = (event) => {
+        if (session.settled) {
+          return;
+        }
+        const input = event.inputBuffer.getChannelData(0);
+        // 采集能量统计：Chrome 在部分设备上对非原生采样率 context 会输出全零静音流
+        session.audioFrames += 1;
+        let peak = 0;
+        for (let i = 0; i < input.length; i += 1) {
+          const value = Math.abs(input[i]);
+          if (value > peak) {
+            peak = value;
+          }
+        }
+        if (peak === 0) {
+          session.silentFrames += 1;
+        }
+        const pcm = pcm16Encode(input, context.sampleRate);
+        const socket = session.socket;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          flushAudio(session);
+          try {
+            socket.send(pcm);
+          } catch {
+            // 断连由 onclose 统一处理
+          }
+        } else {
+          // 暂存建连前的 PCM 帧，防止丢失前半段语音
+          session.pendingAudio.push(pcm);
+        }
+      };
+      source.connect(processor);
+      processor.connect(context.destination);
+      return true;
+    },
+    [abortWithError, flushAudio],
+  );
+
   const openAudioPipeline = useCallback(
     async (session: VoiceSession) => {
       try {
@@ -306,59 +395,11 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
           return;
         }
         session.stream = stream;
-        const AudioContextCtor =
-          window.AudioContext ??
-          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-        if (!AudioContextCtor) {
-          failActive(session, "当前浏览器不支持录音");
+        const attached = await attachAudioCapture(session, stream, true);
+        if (!attached) {
+          abortWithError(session, "麦克风初始化失败，请重试");
           return;
         }
-        let context: AudioContext;
-        try {
-          // 让浏览器原生重采样到 16kHz（自带抗混叠滤波）；旧环境不支持时退回
-          // 默认采样率 + JS 隔点抽取。手工降采样没有低通，高频会折叠成噪声，
-          // 实测会明显损伤识别准确率（丢字/错字）。
-          context = new AudioContextCtor({ sampleRate: TARGET_SAMPLE_RATE });
-        } catch {
-          context = new AudioContextCtor();
-        }
-        session.context = context;
-        if (context.state === "suspended") {
-          // iOS 等浏览器在非手势栈中创建的上下文可能处于 suspended，不会出音频
-          try {
-            await context.resume();
-          } catch {
-            // 继续走下面的 running 校验
-          }
-        }
-        if (context.state !== "running") {
-          failActive(session, "麦克风初始化失败，请重试");
-          return;
-        }
-        const source = context.createMediaStreamSource(stream);
-        session.source = source;
-        const processor = context.createScriptProcessor(1024, 1, 1);
-        session.processor = processor;
-        processor.onaudioprocess = (event) => {
-          if (session.settled) {
-            return;
-          }
-          const pcm = pcm16Encode(event.inputBuffer.getChannelData(0), context.sampleRate);
-          const socket = session.socket;
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            flushAudio(session);
-            try {
-              socket.send(pcm);
-            } catch {
-              // 断连由 onclose 统一处理
-            }
-          } else {
-            // 暂存建连前的 PCM 帧，防止丢失前半段语音
-            session.pendingAudio.push(pcm);
-          }
-        };
-        source.connect(processor);
-        processor.connect(context.destination);
         if (currentRef.current === session) {
           setStatus("recording");
         }
@@ -367,11 +408,61 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
           flushAudio(session);
           sendFinish(session);
         }
+        // 采集静音自愈：Chrome 部分设备上 16kHz context 的麦克风输入是全零静音流
+        // （间歇性发作，表现为"发出去没内容"），检测到后拆掉管线、用默认采样率
+        // + JS 降采样重建，用户无感。
+        session.silenceCheckTimer = window.setTimeout(() => {
+          if (session.settled || session.degradedRetryDone) {
+            return;
+          }
+          // 还没有任何音频帧，或已有非静音帧 → 采集正常
+          if (session.audioFrames === 0 || session.silentFrames < session.audioFrames) {
+            return;
+          }
+          const stream = session.stream;
+          if (!stream) {
+            return;
+          }
+          session.degradedRetryDone = true;
+          // 只拆音频管线，保留 stream 与会话状态
+          const processor = session.processor;
+          session.processor = null;
+          if (processor) {
+            processor.onaudioprocess = null;
+            processor.disconnect();
+          }
+          const source = session.source;
+          session.source = null;
+          if (source) {
+            source.disconnect();
+          }
+          const context = session.context;
+          session.context = null;
+          if (context && context.state !== "closed") {
+            void context.close();
+          }
+          session.audioFrames = 0;
+          session.silentFrames = 0;
+          void attachAudioCapture(session, stream, false).then((reattached) => {
+            if (session.settled) {
+              return;
+            }
+            if (!reattached) {
+              abortWithError(session, "麦克风初始化失败，请重试");
+              return;
+            }
+            if (session.released) {
+              // 重建窗口期正好松手：补发 finish
+              flushAudio(session);
+              sendFinish(session);
+            }
+          });
+        }, 1500);
       } catch {
         abortWithError(session, "无法访问麦克风，请检查浏览器权限");
       }
     },
-    [abortWithError, flushAudio, sendFinish],
+    [abortWithError, attachAudioCapture, flushAudio, sendFinish],
   );
 
   const press = useCallback(() => {
