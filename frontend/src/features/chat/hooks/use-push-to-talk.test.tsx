@@ -206,7 +206,7 @@ describe("usePushToTalk", () => {
     expect(onInterim).toHaveBeenCalledWith("我想去");
   });
 
-  it("finish() 后收到 done 事件调用 onFinal 并关闭连接", async () => {
+  it("finish() 后进入 finalizing，收到 done 事件调用 onFinal 并复位", async () => {
     const onFinal = vi.fn();
     const { result } = renderHook(() => usePushToTalk({ onInterim: vi.fn(), onFinal, onError: vi.fn() }));
 
@@ -220,6 +220,7 @@ describe("usePushToTalk", () => {
       result.current.finish();
     });
     expect(lastSocket().sent.some((item) => item === '{"action":"finish"}')).toBe(true);
+    expect(result.current.finalizing).toBe(true);
 
     await act(async () => {
       lastSocket().receive(JSON.stringify({ type: "done", text: "我想去北京" }));
@@ -227,7 +228,61 @@ describe("usePushToTalk", () => {
 
     expect(onFinal).toHaveBeenCalledWith("我想去北京");
     expect(result.current.recording).toBe(false);
+    expect(result.current.finalizing).toBe(false);
     expect(result.current.interimText).toBe("");
+  });
+
+  it("松手后收到最终句（sentence_end）立即交付并退出 finalizing，不等 done", async () => {
+    const onFinal = vi.fn();
+    const { result } = renderHook(() => usePushToTalk({ onInterim: vi.fn(), onFinal, onError: vi.fn() }));
+
+    await act(async () => {
+      result.current.start();
+      await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+      lastSocket().open();
+    });
+
+    act(() => {
+      result.current.finish();
+    });
+    expect(result.current.finalizing).toBe(true);
+
+    await act(async () => {
+      lastSocket().receive(JSON.stringify({ type: "sentence", text: "帮我查天气", sentence_end: true }));
+    });
+
+    expect(onFinal).toHaveBeenCalledWith("帮我查天气");
+    expect(result.current.finalizing).toBe(false);
+    expect(result.current.recording).toBe(false);
+
+    // 随后的 done 消息不应重复交付
+    await act(async () => {
+      lastSocket().receive(JSON.stringify({ type: "done", text: "帮我查天气" }));
+    });
+    expect(onFinal).toHaveBeenCalledTimes(1);
+  });
+
+  it("finalizing 期间 cancel() 复位等待态且不交付结果", async () => {
+    const onFinal = vi.fn();
+    const { result } = renderHook(() => usePushToTalk({ onInterim: vi.fn(), onFinal, onError: vi.fn() }));
+
+    await act(async () => {
+      result.current.start();
+      await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+      lastSocket().open();
+    });
+
+    act(() => {
+      result.current.finish();
+    });
+    expect(result.current.finalizing).toBe(true);
+
+    act(() => {
+      result.current.cancel();
+    });
+
+    expect(result.current.finalizing).toBe(false);
+    expect(onFinal).not.toHaveBeenCalled();
   });
 
   it("cancel() 直接关闭连接不发送结果", async () => {

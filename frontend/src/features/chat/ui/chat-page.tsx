@@ -179,6 +179,8 @@ function ChatPageInner() {
   const [renameInput, setRenameInput] = useState("");
   const [modelProfileSheetOpen, setModelProfileSheetOpen] = useState(false);
   const [playingSpeechKey, setPlayingSpeechKey] = useState<string | null>(null);
+  // 语音松手后转写未完成的等待态：null = 无等待，字符串 = 等待中已识别的文本
+  const [voicePendingText, setVoicePendingText] = useState<string | null>(null);
   const { url: browserUrl, close: closeBrowser } = useBrowser();
   
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -201,7 +203,7 @@ function ChatPageInner() {
       return;
     }
     node.scrollTop = node.scrollHeight;
-  }, [messages, loading]);
+  }, [messages, loading, voicePendingText]);
 
   const stopSpeechPlayback = useCallback(() => {
     const activeAudio = activeAudioRef.current;
@@ -654,6 +656,23 @@ function ChatPageInner() {
           />
         ))}
 
+        {voicePendingText !== null ? (
+          <div className="fade-up flex px-4">
+            <div className="flex w-full flex-col items-end">
+              {voicePendingText ? (
+                <div className="max-w-[90%] rounded-xl border border-[#e8d5c4] bg-[#f5ede4] px-5 py-2.5 text-base leading-relaxed break-words text-[#2c2b28] shadow-sm">
+                  {voicePendingText}
+                </div>
+              ) : null}
+              <div className="flex items-center gap-1.5 px-2 py-1">
+                <span className="typing-dot" style={{ animationDelay: "0ms" }} />
+                <span className="typing-dot" style={{ animationDelay: "160ms" }} />
+                <span className="typing-dot" style={{ animationDelay: "320ms" }} />
+              </div>
+            </div>
+          </div>
+        ) : null}
+
       </section>
 
       <ChatComposer
@@ -663,6 +682,7 @@ function ChatPageInner() {
         onSend={sendMessage}
         onOpenModelProfileSheet={() => setModelProfileSheetOpen(true)}
         onStop={stopGenerating}
+        onVoicePendingChange={setVoicePendingText}
       />
 
       <AppSurfaceSheet

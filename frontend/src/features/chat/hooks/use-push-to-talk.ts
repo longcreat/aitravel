@@ -37,6 +37,8 @@ interface PushToTalkOptions {
 
 export interface PushToTalk {
   recording: boolean;
+  /** 松手后等待识别最终结果的过渡态，用于在聊天区展示"转写中"加载动画 */
+  finalizing: boolean;
   interimText: string;
   error: string | null;
   start: () => void;
@@ -46,6 +48,7 @@ export interface PushToTalk {
 
 export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions): PushToTalk {
   const [recording, setRecording] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
   const [interimText, setInterimText] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -59,11 +62,14 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
   const isStartingRef = useRef<boolean>(false);
   const shouldFinishWhenStartedRef = useRef<boolean>(false);
   const hasEmittedFinalRef = useRef<boolean>(false);
+  const finishingRef = useRef<boolean>(false);
   const audioQueueRef = useRef<ArrayBuffer[]>([]);
 
   const cleanup = useCallback(() => {
     isStartingRef.current = false;
     shouldFinishWhenStartedRef.current = false;
+    finishingRef.current = false;
+    setFinalizing(false);
     audioQueueRef.current = [];
     if (doneTimerRef.current !== null) {
       window.clearTimeout(doneTimerRef.current);
@@ -143,6 +149,8 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
   );
 
   const sendFinishSignal = useCallback(() => {
+    finishingRef.current = true;
+    setFinalizing(true);
     flushAudioQueue();
     const socket = wsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -242,6 +250,20 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
           if (currentText) {
             onInterim(currentText);
           }
+          if (message.sentence_end && finishingRef.current) {
+            // 松手后的最终句（.completed）已含完整结果，直接交付，不必再等 done
+            const finalText = currentText.trim() || latestTextRef.current.trim();
+            if (doneTimerRef.current !== null) {
+              window.clearTimeout(doneTimerRef.current);
+              doneTimerRef.current = null;
+            }
+            cleanup();
+            setRecording(false);
+            setInterimText("");
+            if (finalText) {
+              emitFinal(finalText);
+            }
+          }
         } else if (message.type === "done") {
           if (doneTimerRef.current !== null) {
             window.clearTimeout(doneTimerRef.current);
@@ -322,5 +344,5 @@ export function usePushToTalk({ onInterim, onFinal, onError }: PushToTalkOptions
     setInterimText("");
   }, [cleanup]);
 
-  return { recording, interimText, error, start, finish, cancel };
+  return { recording, finalizing, interimText, error, start, finish, cancel };
 }

@@ -1,4 +1,4 @@
-import { ArrowUp, Brain, ChevronDown, Keyboard, Mic, Square } from "lucide-react";
+import { ArrowUp, Brain, ChevronDown, Keyboard, LoaderCircle, Mic, Square } from "lucide-react";
 import { FormEvent, useState, useRef, useEffect } from "react";
 
 import type { SendIntentResult } from "@/features/chat/model/chat.types";
@@ -13,6 +13,8 @@ interface ChatComposerProps {
   onSend: (message: string) => Promise<SendIntentResult>;
   onOpenModelProfileSheet: () => void;
   onStop: () => void;
+  /** 松手后转写未完成的等待态上报：null = 无等待，字符串 = 等待中已识别的文本 */
+  onVoicePendingChange?: (pendingText: string | null) => void;
 }
 
 export function ChatComposer({
@@ -23,6 +25,7 @@ export function ChatComposer({
   onSend,
   onOpenModelProfileSheet,
   onStop,
+  onVoicePendingChange,
 }: ChatComposerProps) {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<"text" | "voice">("text");
@@ -31,6 +34,7 @@ export function ChatComposer({
 
   const {
     recording,
+    finalizing,
     interimText,
     error: sttError,
     start: startRecording,
@@ -41,10 +45,20 @@ export function ChatComposer({
     onFinal: (text) => {
       if (!loading && ready) {
         void onSend(text);
+      } else {
+        // 极端时序下发送通道被占用时不丢字，退回输入框让用户手动发送
+        setMode("text");
+        setValue(text);
       }
     },
     onError: () => setVoiceText(""),
   });
+
+  // 松手后转写尚未完成时，把等待态上报给聊天区展示加载动画；
+  // 非等待期间的 interim 更新上报 null（相同值不会触发父组件重渲染）。
+  useEffect(() => {
+    onVoicePendingChange?.(finalizing ? interimText : null);
+  }, [finalizing, interimText, onVoicePendingChange]);
 
   useEffect(() => {
     if (value === "" && textareaRef.current) {
@@ -169,7 +183,7 @@ export function ChatComposer({
             <button
               type="button"
               aria-label="push-to-talk"
-              disabled={!ready || loading}
+              disabled={!ready || loading || finalizing}
               onContextMenu={(e) => e.preventDefault()}
               onPointerDown={(event) => {
                 event.preventDefault();
@@ -205,6 +219,11 @@ export function ChatComposer({
               <span className="text-base select-none">
                 {recording ? (
                   interimText || "正在聆听，松开发送…"
+                ) : finalizing ? (
+                  <span className="flex items-center justify-center gap-2 text-[#7a766d]">
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    语音识别中…
+                  </span>
                 ) : sttError ? (
                   <span className="text-xs text-rose-500" role="alert">
                     {sttError}

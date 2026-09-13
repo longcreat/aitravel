@@ -59,6 +59,8 @@ class DashScopeSttSession:
         self._final_text = ""
         self._latest_text = ""
         self._mode = "omni"  # "omni" | "legacy"
+        self._finishing = False
+        self._done_sent = False
 
     @property
     def ready(self) -> bool:
@@ -77,10 +79,20 @@ class DashScopeSttSession:
             if is_final:
                 self._final_text = clean
         self._enqueue({"type": "sentence", "text": text, "sentence_end": is_final})
+        # 最终句（.completed）必定先于 session.finished 到达；松手后直接交付，
+        # 不必再等服务端 session.finished，大幅降低松手后的等待延迟。
+        if is_final and self._finishing:
+            self._emit_done()
 
-    def _on_complete(self) -> None:
+    def _emit_done(self) -> None:
+        if self._done_sent:
+            return
+        self._done_sent = True
         text = self._final_text or self._latest_text
         self._enqueue({"type": "done", "text": text})
+
+    def _on_complete(self) -> None:
+        self._emit_done()
 
     def _on_error(self, message: str) -> None:
         self._enqueue({"type": "error", "message": message})
@@ -115,7 +127,10 @@ class DashScopeSttSession:
                         try:
                             etype = response.get("type")
                             if etype == "conversation.item.input_audio_transcription.text":
-                                session_self._on_text(str(response.get("stash", "")), is_final=False)
+                                # 官方协议：已确认前缀 text + 临时草稿 stash，实时预览必须拼接两者
+                                confirmed = str(response.get("text", "") or "")
+                                stash = str(response.get("stash", "") or "")
+                                session_self._on_text(confirmed + stash, is_final=False)
                             elif etype == "conversation.item.input_audio_transcription.completed":
                                 session_self._on_text(str(response.get("transcript", "")), is_final=True)
                             elif etype == "session.finished":
@@ -250,6 +265,7 @@ class DashScopeSttSession:
 
     def finish(self) -> None:
         """结束识别：通知服务端完成语音识别。"""
+        self._finishing = True
         if self._mode == "omni" and self._conversation is not None:
             conv, self._conversation = self._conversation, None
             try:
@@ -257,7 +273,9 @@ class DashScopeSttSession:
                     conv.commit()
                 except Exception:  # noqa: BLE001
                     pass
-                conv.end_session()
+                # 结果已在 .completed 到达时交付（见 _on_text），这里只做会话清理，
+                # 短超时避免松手后长时间阻塞。
+                conv.end_session(timeout=5)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Omni STT end_session failed")
         elif self._mode == "legacy" and self._recognizer is not None:
