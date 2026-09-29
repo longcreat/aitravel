@@ -236,6 +236,139 @@ async def test_stream_agent_run_emits_one_tool_start_and_one_tool_done(
     assert [part.type for part in state.ui_parts] == ["tool"]
 
 
+def _reasoning_delta_event(text: str) -> dict:
+    return {
+        "method": "messages",
+        "params": {
+            "data": [
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "reasoning-delta", "reasoning": text},
+                }
+            ]
+        },
+    }
+
+
+class _MultiSuperstepAgent:
+    """两轮模型调用 + 一次工具执行的完整 v3 事件序列。
+
+    轮1: 思考增量 → 正文增量（触发 reasoning→text 切换 sealing）
+    轮2: 工具执行（values 快照驱动 tool.start/tool.done）
+    轮3: 思考增量 → 正文增量（工具后新开 part）
+    """
+
+    async def astream_events(self, _payload, config=None, context=None, version=None):
+        assert version == "v3"
+
+        async def _run():
+            yield _reasoning_delta_event("先想")
+            yield _reasoning_delta_event("一下。")
+            yield _text_delta_event("我先查")
+            yield _values_event(
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="我先查",
+                                tool_calls=[
+                                    {
+                                        "name": "maps_weather",
+                                        "args": {"city": "杭州"},
+                                        "id": "call-ms-1",
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
+                }
+            )
+            yield _values_event(
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(name="maps_weather", content="杭州晴", tool_call_id="call-ms-1")
+                        ]
+                    }
+                }
+            )
+            yield _reasoning_delta_event("查到了。")
+            yield _text_delta_event("杭州晴，26℃。")
+
+        return _run()
+
+
+@pytest.mark.asyncio
+async def test_stream_multi_superstep_part_ordering_and_accumulation() -> None:
+    """多轮调用下：part 按类型切换正确 seal、工具事件各一次、累计文本/思考完整。"""
+    service = AgentStreamService(runtime_service=_FakeRuntimeServiceOf(_MultiSuperstepAgent()))
+    state = StreamRunState()
+    tts_chunks: list[str] = []
+    events: list[tuple[str, dict]] = []
+
+    async for event_name, payload in service.stream_agent_run(
+        thread_id="thread-multi",
+        agent_input={"messages": ["ignored"]},
+        checkpoint_id=None,
+        model_profile_key="standard",
+        state=state,
+        agent_context=AgentRequestContext(
+            user_id="user-1",
+            thread_id="thread-multi",
+            model_profile_key="standard",
+            session_meta={},
+        ),
+        on_assistant_text_chunk=tts_chunks.append,
+    ):
+        events.append((event_name, payload))
+
+    names = [name for name, _ in events]
+    # 事件骨架：reasoning → seal → text → seal → tool.start → tool.done → reasoning → seal → text
+    assert names == [
+        "part.delta",  # reasoning "先想"
+        "part.delta",  # reasoning "一下。"
+        "part.delta",  # seal reasoning-1
+        "part.delta",  # text "我先查"
+        "part.delta",  # seal text-1（工具来临前收尾）
+        "tool.start",
+        "tool.done",
+        "part.delta",  # reasoning "查到了。"（工具后新开 reasoning part）
+        "part.delta",  # seal reasoning-2
+        "part.delta",  # text "杭州晴，26℃。"
+    ]
+
+    # part 序列与状态
+    assert [(p.type, p.text) for p in state.ui_parts if p.type in {"reasoning", "text"}] == [
+        ("reasoning", "先想一下。"),
+        ("text", "我先查"),
+        ("reasoning", "查到了。"),
+        ("text", "杭州晴，26℃。"),
+    ]
+    assert [p.status for p in state.ui_parts if p.type in {"reasoning", "text"}] == [
+        "completed",
+        "completed",
+        "completed",
+        "streaming",  # 最后一段正文尚未被显式收尾（message.completed 时由 service 收尾）
+    ]
+
+    # 累计语义（build_final_response 的数据源）
+    assert state.assistant_text == "我先查杭州晴，26℃。"
+    assert state.reasoning_text == "先想一下。查到了。"
+
+    # TTS 逐字流只含可见文本，含空白、无思考内容
+    assert "".join(tts_chunks) == "我先查杭州晴，26℃。"
+
+    # 工具事件恰好一次 start / 一次 done
+    assert names.count("tool.start") == 1
+    assert names.count("tool.done") == 1
+
+
+def _FakeRuntimeServiceOf(agent):
+    return type("RuntimeService", (), {"require_runtime": lambda self: type("Runtime", (), {"agent": agent})()})()
+
+
 def test_extract_tool_events_prefers_tool_artifact_for_payload() -> None:
     events = list(
         _extract_tool_events(
