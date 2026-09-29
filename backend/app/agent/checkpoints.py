@@ -60,13 +60,15 @@ class AgentCheckpointService:
         return None
 
     async def prune_after(self, thread_id: str, checkpoint_id: str | None) -> None:
-        """删除稳定点之后的半成品 checkpoint/writes。"""
+        """删除稳定点之后的半成品 checkpoint/writes。
+
+        schema 在 startup 时已由 checkpointer.setup() 建好，这里不再重复。
+        """
         runtime = self._runtime_service.runtime
         if runtime is None:
             return
 
         checkpointer = runtime.checkpointer
-        await checkpointer.setup()
 
         if checkpoint_id is None:
             await checkpointer.adelete_thread(thread_id)

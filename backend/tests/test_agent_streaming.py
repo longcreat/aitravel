@@ -13,35 +13,50 @@ from app.agent.streaming import (
 
 
 # ---------------------------------------------------------------------------
-# Fixtures: minimal LangGraph-style stream emitters
+# Fixtures: minimal LangGraph-style v3 protocol stream emitters
 # ---------------------------------------------------------------------------
 #
-# The new streaming architecture treats `messages` purely as a text/reasoning
-# delta channel and relies on `updates` for tool lifecycle events. Each fake
-# agent below mirrors what LangGraph 1.x actually emits in production:
+# The v3 streaming architecture consumes raw protocol events from
+# `astream_events(version="v3")`:
 #
-#   * model node text token  →  ``messages`` AIMessageChunk(content="…")
-#   * model node finishes    →  ``updates`` AIMessage(tool_calls=[...] | content)
-#   * tool node finishes     →  ``updates`` ToolMessage(...)
+#   * model node text token  →  `messages` channel content-block-delta (text-delta)
+#   * model node finishes    →  `values` snapshot with AIMessage(tool_calls) / content
+#   * tool node finishes     →  `values` snapshot with ToolMessage(...)
 #
-# For brevity we elide the per-token tool_call_chunks entirely — they are
-# explicitly ignored by the streaming layer in the new design.
+# For brevity we elide tool-call content blocks on the messages channel — they
+# are explicitly ignored by the streaming layer in the new design.
+
+
+def _text_delta_event(text: str) -> dict:
+    return {
+        "method": "messages",
+        "params": {
+            "data": [
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "text-delta", "text": text},
+                }
+            ]
+        },
+    }
+
+
+def _values_event(data: dict) -> dict:
+    return {"method": "values", "params": {"data": data}}
 
 
 class _WhitespaceChunkAgent:
-    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
+    async def astream_events(self, _payload, config=None, context=None, version=None):
         assert config is not None
         assert context is not None
-        assert stream_mode == ["messages", "updates"]
-        assert version == "v2"
-        yield {
-            "type": "messages",
-            "data": (AIMessageChunk(content="你好 ", id="chunk-1"), {"langgraph_node": "model"}),
-        }
-        yield {
-            "type": "messages",
-            "data": (AIMessageChunk(content="世界", id="chunk-2"), {"langgraph_node": "model"}),
-        }
+        assert version == "v3"
+
+        async def _run():
+            yield _text_delta_event("你好 ")
+            yield _text_delta_event("世界")
+
+        return _run()
 
 
 class _FakeRuntimeService:
@@ -50,71 +65,67 @@ class _FakeRuntimeService:
 
 
 class _ToolCallAgent:
-    """Real LangGraph emission shape:
-        1. messages chunks for tool_call_chunks (ignored by streaming layer)
-        2. updates: AIMessage with completed tool_calls (drives tool.start)
-        3. updates: ToolMessage with execution result (drives tool.done)
+    """Real LangGraph v3 emission shape:
+        1. messages channel: tool-call content blocks (ignored by streaming layer)
+        2. values snapshot: AIMessage with completed tool_calls (drives tool.start)
+        3. values snapshot: ToolMessage with execution result (drives tool.done)
     """
 
-    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
-        assert stream_mode == ["messages", "updates"]
-        # Streaming chunks of the tool call — present in real traffic but
-        # deliberately ignored by the new streaming layer (no tool.start here).
-        yield {
-            "type": "messages",
-            "data": (
-                AIMessageChunk(
-                    content="",
-                    id="chunk-tool-1",
-                    tool_call_chunks=[
+    async def astream_events(self, _payload, config=None, context=None, version=None):
+        assert version == "v3"
+
+        async def _run():
+            # Streaming tool-call blocks — present in real traffic but
+            # deliberately ignored by the streaming layer (no tool.start here).
+            yield {
+                "method": "messages",
+                "params": {
+                    "data": [
                         {
-                            "name": "maps_weather",
-                            "args": '{"city":"杭州"}',
-                            "id": "call-weather-1",
+                            "event": "content-block-start",
                             "index": 0,
+                            "block": {"type": "tool_call", "name": "maps_weather"},
                         }
-                    ],
-                ),
-                {"langgraph_node": "model"},
-            ),
-        }
-        # model node finishes -> AIMessage with completed tool_calls (this drives tool.start)
-        yield {
-            "type": "updates",
-            "data": {
-                "model": {
-                    "messages": [
-                        AIMessage(
-                            content="",
-                            id="ai-msg-tool-1",
-                            tool_calls=[
-                                {
-                                    "name": "maps_weather",
-                                    "args": {"city": "杭州"},
-                                    "id": "call-weather-1",
-                                    "type": "tool_call",
-                                }
-                            ],
-                        )
                     ]
+                },
+            }
+            # model node finishes -> values snapshot with AIMessage (drives tool.start)
+            yield _values_event(
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                id="ai-msg-tool-1",
+                                tool_calls=[
+                                    {
+                                        "name": "maps_weather",
+                                        "args": {"city": "杭州"},
+                                        "id": "call-weather-1",
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
                 }
-            },
-        }
-        # tool node finishes -> ToolMessage (drives tool.done)
-        yield {
-            "type": "updates",
-            "data": {
-                "tools": {
-                    "messages": [
-                        ToolMessage(
-                            name="maps_weather",
-                            content="杭州晴，26℃",
-                            tool_call_id="call-weather-1",
-                        )
-                    ]
+            )
+            # tool node finishes -> values snapshot with ToolMessage (drives tool.done)
+            yield _values_event(
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                name="maps_weather",
+                                content="杭州晴，26℃",
+                                tool_call_id="call-weather-1",
+                            )
+                        ]
+                    }
                 }
-            },
-        }
+            )
+
+        return _run()
 
 
 class _ToolCallRuntimeService:
@@ -256,66 +267,68 @@ def test_extract_tool_events_prefers_tool_artifact_for_payload() -> None:
 
 
 class _HotelToolAgent:
-    """Streams the canonical model→tools update sequence with a hotel artifact.
+    """Streams the canonical model→tools values-snapshot sequence with a hotel artifact.
 
     Verifies that ``ChatToolPart.cards`` is populated by the structured card
     extractor when the underlying tool returns a recognisable payload.
     """
 
-    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
-        assert stream_mode == ["messages", "updates"]
-        # model node finishes — drives tool.start
-        yield {
-            "type": "updates",
-            "data": {
-                "model": {
-                    "messages": [
-                        AIMessage(
-                            content="",
-                            id="ai-msg-hotel-1",
-                            tool_calls=[
-                                {
-                                    "name": "rollinggo-hotel_searchHotels",
-                                    "args": {"city": "成都"},
-                                    "id": "call-hotel-1",
-                                    "type": "tool_call",
-                                }
-                            ],
-                        )
-                    ]
+    async def astream_events(self, _payload, config=None, context=None, version=None):
+        assert version == "v3"
+
+        async def _run():
+            # model node finishes — drives tool.start
+            yield _values_event(
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                id="ai-msg-hotel-1",
+                                tool_calls=[
+                                    {
+                                        "name": "rollinggo-hotel_searchHotels",
+                                        "args": {"city": "成都"},
+                                        "id": "call-hotel-1",
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
                 }
-            },
-        }
-        # tools node finishes — drives tool.done with cards extracted
-        yield {
-            "type": "updates",
-            "data": {
-                "tools": {
-                    "messages": [
-                        ToolMessage(
-                            name="rollinggo-hotel_searchHotels",
-                            content="找到 2 家酒店",
-                            artifact=[
-                                {
-                                    "hotelName": "桔子酒店",
-                                    "address": "东胜街1号",
-                                    "price": {"hasPrice": True, "lowestPrice": 277, "currency": "CNY"},
-                                    "starLevel": 3,
-                                    "bookingUrl": "https://example.com/booking/1",
-                                },
-                                {
-                                    "hotelName": "海友酒店",
-                                    "location": "锦江区",
-                                    "price": {"hasPrice": True, "lowestPrice": 292, "currency": "CNY"},
-                                    "bookingUrl": "https://example.com/booking/2",
-                                },
-                            ],
-                            tool_call_id="call-hotel-1",
-                        )
-                    ]
+            )
+            # tools node finishes — drives tool.done with cards extracted
+            yield _values_event(
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                name="rollinggo-hotel_searchHotels",
+                                content="找到 2 家酒店",
+                                artifact=[
+                                    {
+                                        "hotelName": "桔子酒店",
+                                        "address": "东胜街1号",
+                                        "price": {"hasPrice": True, "lowestPrice": 277, "currency": "CNY"},
+                                        "starLevel": 3,
+                                        "bookingUrl": "https://example.com/booking/1",
+                                    },
+                                    {
+                                        "hotelName": "海友酒店",
+                                        "location": "锦江区",
+                                        "price": {"hasPrice": True, "lowestPrice": 292, "currency": "CNY"},
+                                        "bookingUrl": "https://example.com/booking/2",
+                                    },
+                                ],
+                                tool_call_id="call-hotel-1",
+                            )
+                        ]
+                    }
                 }
-            },
-        }
+            )
+
+        return _run()
 
 
 class _HotelToolRuntimeService:

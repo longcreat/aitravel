@@ -12,13 +12,12 @@ from langchain.agents.middleware import (
     AgentMiddleware,
     ModelRequest,
     ModelResponse,
+    SummarizationMiddleware,
+    ToolErrorMiddleware,
     dynamic_prompt,
-    wrap_tool_call,
 )
-from langchain.agents.middleware.types import ModelRequest as ModelRequestT
+from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import ToolMessage
-from langgraph.errors import GraphInterrupt
 
 from app.agent.context import AgentRequestContext
 from app.prompt.system import TRAVEL_SYSTEM_PROMPT
@@ -27,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEZONE = "Asia/Shanghai"
 _WEEKDAY_ZH = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+# 长会话保护：接近该 token 量时把旧消息折叠成摘要，防止上下文窗口溢出
+_SUMMARIZATION_TRIGGER_TOKENS = 4000
+_SUMMARIZATION_KEEP_MESSAGES = 20
 
 
 def _resolve_timezone(timezone_name: str) -> tuple[str, Any]:
@@ -92,7 +95,7 @@ def build_runtime_system_prompt(context: AgentRequestContext) -> str:
 
 
 @dynamic_prompt
-def travel_dynamic_prompt(request: ModelRequestT[AgentRequestContext]) -> str:
+def travel_dynamic_prompt(request: ModelRequest[AgentRequestContext]) -> str:
     """按运行时上下文动态拼装系统提示词。"""
     runtime_context = request.runtime.context if request.runtime is not None else None
     if runtime_context is None:
@@ -108,26 +111,14 @@ def travel_dynamic_prompt(request: ModelRequestT[AgentRequestContext]) -> str:
     return build_runtime_system_prompt(runtime_context)
 
 
-@wrap_tool_call
-async def tool_error_boundary(request, handler):
-    """统一把工具异常转换成标准 ToolMessage。
+def _tool_error_to_message(exc: Exception, request: ToolCallRequest) -> str:
+    """统一把工具异常转换成 status=error 的 ToolMessage 文本。
 
-    注意：GraphInterrupt（由 interrupt() 抛出）必须透传给 LangGraph，
-    不能在此处被捕获——否则 human-in-the-loop 的 interrupt 机制将完全失效。
+    内建 ``ToolErrorMiddleware`` 自身会透传 ``GraphBubbleUp``（interrupt 机制），
+    其余异常经此全部转成错误 ToolMessage 交回模型，行为与旧手写边界一致。
     """
-    try:
-        return await handler(request)
-    except GraphInterrupt:
-        raise  # 让 LangGraph 的 checkpoint / interrupt 机制正常接管
-    except Exception as exc:  # pragma: no cover - exercised via agent runtime
-        tool_name = request.tool.name if request.tool is not None else str(request.tool_call.get("name") or "unknown")
-        tool_call_id = str(request.tool_call.get("id") or f"{tool_name}-error")
-        return ToolMessage(
-            content=f"工具 {tool_name} 执行失败：{exc}",
-            name=tool_name,
-            tool_call_id=tool_call_id,
-            status="error",
-        )
+    tool_name = str(request.tool_call.get("name") or "unknown")
+    return f"工具 {tool_name} 执行失败：{exc}"
 
 
 class ModelSelectionMiddleware(AgentMiddleware):
@@ -196,10 +187,24 @@ def build_agent_middleware(
 ) -> list[Any]:
     """返回当前 agent 需要挂载的官方 middleware 列表。
 
-    若提供了模型档位字典，则会在末尾追加一个 ``ModelSelectionMiddleware``，
-    让运行时根据 ``AgentRequestContext.model_profile_key`` 切换模型实例。
+    - ``travel_dynamic_prompt``：运行时上下文注入系统提示词
+    - ``SummarizationMiddleware``：长会话自动摘要，防上下文溢出
+    - ``ToolErrorMiddleware``：工具异常统一转错误 ToolMessage（内建，透传 interrupt）
+    - ``ModelSelectionMiddleware``：按档位切换模型实例，必须挂在最内层（最后）
     """
-    middleware: list[Any] = [travel_dynamic_prompt, tool_error_boundary]
+    middleware: list[Any] = [travel_dynamic_prompt]
+    default_model = chat_models_by_profile.get(default_profile_key) if chat_models_by_profile and default_profile_key else None
+    if isinstance(default_model, BaseChatModel):
+        # 仅在拿到真实模型实例时挂载；测试桩传入字符串模型名时跳过
+        middleware.append(
+            SummarizationMiddleware(
+                model=default_model,
+                trigger=("tokens", _SUMMARIZATION_TRIGGER_TOKENS),
+                keep=("messages", _SUMMARIZATION_KEEP_MESSAGES),
+            )
+        )
+    if chat_models_by_profile and default_profile_key:
+        middleware.append(ToolErrorMiddleware(on_error=_tool_error_to_message))
     if chat_models_by_profile and default_profile_key:
         middleware.append(
             ModelSelectionMiddleware(

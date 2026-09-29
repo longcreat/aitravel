@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agent.service import TravelAgentService
 from app.auth.store import AuthSQLiteStore
@@ -12,8 +12,23 @@ from app.db.bootstrap import bootstrap_sqlite_database
 from app.schemas.chat import ChatInvokeRequest
 
 
+def _text_delta_event(text: str) -> dict:
+    return {
+        "method": "messages",
+        "params": {
+            "data": [
+                {"event": "content-block-delta", "index": 0, "delta": {"type": "text-delta", "text": text}}
+            ]
+        },
+    }
+
+
+def _values_event(data: dict) -> dict:
+    return {"method": "values", "params": {"data": data}}
+
+
 class _FakeAgent:
-    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
+    async def astream_events(self, _payload, config=None, context=None, version=None):
         assert config is not None
         assert context is not None
         assert context.user_id
@@ -25,26 +40,15 @@ class _FakeAgent:
         # ModelSelectionMiddleware 通过 request.override(model=...) 完成。
         assert "llm_model" not in config["configurable"]
         assert config["configurable"]["thread_id"] == "thread-1"
-        assert stream_mode == ["messages", "updates"]
-        assert version == "v2"
+        assert version == "v3"
         assert _payload == {"messages": [HumanMessage(content="帮我规划日本行程")]}
 
-        yield {
-            "type": "messages",
-            "ns": (),
-            "data": (AIMessageChunk(content="推荐先去东京，", id="chunk-1"), {"langgraph_node": "model"}),
-        }
-        yield {
-            "type": "messages",
-            "ns": (),
-            "data": (AIMessageChunk(content="再去大阪。", id="chunk-2"), {"langgraph_node": "model"}),
-        }
+        async def _run():
+            yield _text_delta_event("推荐先去东京，")
+            yield _text_delta_event("再去大阪。")
 
-        # 人工重复一遍 tool_called / tool_returned 事件，验证服务层去重能力。
-        yield {
-            "type": "updates",
-            "ns": (),
-            "data": {
+            # 人工重复一遍 tool 调用 / 返回快照，验证服务层去重能力。
+            model_snapshot = {
                 "model": {
                     "messages": [
                         AIMessage(
@@ -53,109 +57,83 @@ class _FakeAgent:
                         )
                     ]
                 }
-            },
-        }
-        yield {
-            "type": "updates",
-            "ns": (),
-            "data": {
-                "model": {
-                    "messages": [
-                        AIMessage(
-                            content="我先查一下当前时间，再帮你排顺序。",
-                            tool_calls=[{"id": "call-1", "name": "get_current_time", "args": {}}],
-                        )
-                    ]
-                }
-            },
-        }
-        yield {
-            "type": "updates",
-            "ns": (),
-            "data": {
+            }
+            tools_snapshot = {
                 "tools": {
                     "messages": [ToolMessage(name="get_current_time", content="当前时间为21:02:21", tool_call_id="call-1")]
                 }
-            },
-        }
-        yield {
-            "type": "updates",
-            "ns": (),
-            "data": {
-                "tools": {
-                    "messages": [ToolMessage(name="get_current_time", content="当前时间为21:02:21", tool_call_id="call-1")]
-                }
-            },
-        }
+            }
+            yield _values_event(model_snapshot)
+            yield _values_event(model_snapshot)
+            yield _values_event(tools_snapshot)
+            yield _values_event(tools_snapshot)
+
+        return _run()
 
 class _NoTokenAgent:
-    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
+    async def astream_events(self, _payload, config=None, context=None, version=None):
         assert config is not None
         assert context is not None
         assert context.model_profile_key == "standard"
-        assert stream_mode == ["messages", "updates"]
-        assert version == "v2"
-        yield {
-            "type": "messages",
-            "ns": (),
-            "data": (AIMessageChunk(content="只返回最终答案", id="chunk-final-only"), {"langgraph_node": "model"}),
-        }
+        assert version == "v3"
+
+        async def _run():
+            yield _text_delta_event("只返回最终答案")
+
+        return _run()
 
 
 class _ReasoningAgent:
-    async def astream(self, _payload, config=None, context=None, stream_mode=None, version=None):
+    async def astream_events(self, _payload, config=None, context=None, version=None):
         assert config is not None
-        assert stream_mode == ["messages", "updates"]
-        assert version == "v2"
-        yield {
-            "type": "messages",
-            "ns": (),
-            "data": (
-                AIMessageChunk(content="", additional_kwargs={"reasoning_content": "先分析需求。"}, id="chunk-r1"),
-                {"langgraph_node": "model"},
-            ),
-        }
-        yield {
-            "type": "messages",
-            "ns": (),
-            "data": (
-                AIMessageChunk(content="给你一个推荐方案。", additional_kwargs={"reasoning_content": ""}, id="chunk-a1"),
-                {"langgraph_node": "model"},
-            ),
-        }
+        assert version == "v3"
+
+        async def _run():
+            yield {
+                "method": "messages",
+                "params": {
+                    "data": [
+                        {
+                            "event": "content-block-delta",
+                            "index": 0,
+                            "delta": {"type": "reasoning-delta", "reasoning": "先分析需求。"},
+                        }
+                    ]
+                },
+            }
+            yield _text_delta_event("给你一个推荐方案。")
+
+        return _run()
 
 class _CaptureInputAgent:
     def __init__(self) -> None:
         self.calls: list[list] = []
         self.contexts: list[object] = []
 
-    async def astream(self, payload, config=None, context=None, stream_mode=None, version=None):
+    async def astream_events(self, payload, config=None, context=None, version=None):
         assert config is not None
-        assert stream_mode == ["messages", "updates"]
-        assert version == "v2"
+        assert version == "v3"
         self.calls.append(list(payload["messages"]))
         assert "llm_model" not in config["configurable"]
         self.contexts.append(context)
-        yield {
-            "type": "messages",
-            "ns": (),
-            "data": (AIMessageChunk(content="收到", id="chunk-capture-1"), {"langgraph_node": "model"}),
-        }
+
+        async def _run():
+            yield _text_delta_event("收到")
+
+        return _run()
 
 
 class _SwitchableAgent:
     def __init__(self, delegate) -> None:
         self.delegate = delegate
 
-    async def astream(self, payload, config=None, context=None, stream_mode=None, version=None):
-        async for part in self.delegate.astream(
+    async def astream_events(self, payload, config=None, context=None, version=None):
+        return await self.delegate.astream_events(
             payload,
             config=config,
             context=context,
-            stream_mode=stream_mode,
             version=version,
-        ):
-            yield part
+        )
 
 
 class _DummyCheckpointer:
@@ -432,7 +410,15 @@ async def test_travel_agent_service_startup_uses_context_schema_and_middleware(
 
     monkeypatch.setattr("app.agent.runtime.load_mcp_connections", lambda _path: {})
     monkeypatch.setattr("app.agent.runtime.load_mcp_tools", _fake_load_mcp_tools)
-    monkeypatch.setattr("app.agent.runtime.build_chat_models_by_profile", lambda: {"standard": "fake-model", "thinking": "fake-thinking-model"})
+    # SummarizationMiddleware 需要真实模型实例，这里给轻量 fake
+    from langchain_core.language_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    fake_chat_model = FakeMessagesListChatModel(responses=[AIMessage(content="ok")])
+    monkeypatch.setattr(
+        "app.agent.runtime.build_chat_models_by_profile",
+        lambda: {"standard": fake_chat_model, "thinking": fake_chat_model},
+    )
     dummy_checkpointer = _DummyCheckpointer()
 
     async def _fake_build_memory_runtime(_path: Path):
@@ -456,8 +442,10 @@ async def test_travel_agent_service_startup_uses_context_schema_and_middleware(
     assert captured["context_schema"].__name__ == "AgentRequestContext"
     middleware = captured["middleware"]
     assert isinstance(middleware, list)
-    # 两个固定 middleware（dynamic_prompt + tool_error_boundary）
+    # 三个固定 middleware（dynamic_prompt + Summarization + ToolError）
     # 加上动态注入的 ModelSelectionMiddleware
-    assert len(middleware) == 3
+    assert len(middleware) == 4
     middleware_names = [type(m).__name__ for m in middleware]
     assert "ModelSelectionMiddleware" in middleware_names
+    assert "SummarizationMiddleware" in middleware_names
+    assert "ToolErrorMiddleware" in middleware_names

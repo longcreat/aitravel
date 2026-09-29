@@ -1,31 +1,30 @@
 """Agent 流式执行与事件累计。
 
-架构概述
----------
-LangGraph ``astream(stream_mode=["messages", "updates"])`` 会发出两种事件:
+架构概述（LangGraph 事件流 v3，``astream_events(version="v3")``）
+---------------------------------------------------------------
+消费裸协议事件流（单迭代器、全局有序），关注两个通道：
 
-* **messages**: model 节点产生 LLM token 时持续发出 ``AIMessageChunk``。
-  ToolMessage 在 tools 节点内部也会作为一条 messages 事件出现一次,但**它的
-  完整快照在 updates 中已经覆盖**,所以 messages 阶段我们只取
-  ``AIMessageChunk``,用于把 LLM 文字逐字流给前端。
-* **updates**: 每个图节点 *结束* 时发出一次,带该节点的完整状态:
+* **messages**: content-block 协议的模型输出。``content-block-delta`` 事件中
+  ``text-delta`` → 可见文本增量，``reasoning-delta`` → 思考增量。
+* **values**: 每个图节点结束后的完整状态快照。
     - model 节点结束 → 完整 ``AIMessage`` (含完整 ``tool_calls``)
     - tools 节点结束 → 完整 ``ToolMessage`` (含执行结果)
 
-我们把这两路当成各司其职的通道:
+通道分工：
 
 ================  ===========================================
 信息类型             来源
 ================  ===========================================
-LLM 文字 / 思考     ``messages`` 的 ``AIMessageChunk``
-工具调用决定        ``updates`` 的 ``AIMessage.tool_calls``
-工具执行结果        ``updates`` 的 ``ToolMessage``
+LLM 文字 / 思考     ``messages`` 的 content-block 增量
+工具调用决定        ``values`` 快照的 ``AIMessage.tool_calls``
+工具执行结果        ``values`` 快照的 ``ToolMessage``
 ================  ===========================================
 
-工具调用入参以前曾尝试通过 ``messages`` 的 ``tool_call_chunks`` 流式拼装出"入参
-逐字打字"的视觉效果,但那条路径会与 ``updates`` 的同一调用 id 撞车,造成
-``tool.start`` 重复触发、``status`` 被反复重置。新实现**只通过 ``updates`` 触发
-工具事件**,牺牲了入参流式动画(也就 1-2 秒的过渡),换来事件流的线性、可推理。
+工具调用入参以前曾尝试通过 messages 流的 ``tool_call_chunks`` 流式拼装出"入参
+逐字打字"的视觉效果，但那条路径会与快照通道的同一调用 id 撞车，造成
+``tool.start`` 重复触发、``status`` 被反复重置。当前实现**只通过 ``values``
+快照触发工具事件**，牺牲了入参流式动画(也就 1-2 秒的过渡)，换来事件流的
+线性、可推理。
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, Callable
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage, message_to_dict
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, message_to_dict
 from pydantic import BaseModel
 
 from app.agent.cards import extract_cards_from_trace
@@ -59,9 +58,10 @@ from app.schemas.chat import (
 class StreamRunState:
     """单轮 Agent 流式执行期间的累计状态。"""
 
-    # `messages` 阶段累积所有 AIMessageChunk,主要给 reasoning_content / text_delta 提供
-    # 完整上下文。注意:工具调用判定**不**用它,改由 `updates` 阶段直接给出完整 AIMessage。
-    accumulated_chunk: AIMessageChunk | None = None
+    # v3 messages 通道的可见文本 / 思考增量累计，供 build_final_response 与
+    # 停止场景使用。工具调用判定**不**用它们，改由 values 快照直接给出完整消息。
+    assistant_text: str = ""
+    reasoning_text: str = ""
     streamed_tool_traces: list[ToolTrace] = field(default_factory=list)
     ui_parts: list[ChatMessagePart] = field(default_factory=list)
     seen_called: set[str] = field(default_factory=set)
@@ -109,25 +109,25 @@ class AgentStreamService:
         if checkpoint_id:
             configurable["checkpoint_id"] = checkpoint_id
 
-        async for part in executor.astream(
+        stream = await executor.astream_events(
             agent_input,
             config={"configurable": configurable},
             context=agent_context,
-            stream_mode=["messages", "updates"],
-            version="v2",
-        ):
-            if not isinstance(part, dict):
+            version="v3",
+        )
+        async for event in stream:
+            if not isinstance(event, dict):
                 continue
 
-            part_type = str(part.get("type", "")).strip()
-            raw_data = part.get("data")
+            method = str(event.get("method", ""))
+            params = event.get("params") or {}
+            data = params.get("data")
 
-            if part_type == "messages":
-                # `messages` 阶段:只处理 model 节点的 LLM token 增量。
-                # 工具调用 chunk(tool_call_chunks)在此被刻意忽略 ——
-                # 工具事件由后面的 `updates` 分支唯一触发,避免双源竞争。
-                async for event_name, payload in self._handle_message_chunk(
-                    raw_data,
+            if method == "messages":
+                # messages 通道：content-block 增量（text-delta / reasoning-delta）。
+                # 工具调用块在此被刻意忽略 —— 工具事件由 values 快照唯一触发。
+                async for event_name, payload in self._handle_messages_data(
+                    data,
                     state=state,
                     assistant_message_id=assistant_message_id,
                     version_id=version_id,
@@ -135,11 +135,11 @@ class AgentStreamService:
                 ):
                     yield event_name, payload
 
-            elif part_type == "updates":
-                # `updates` 阶段:节点结束的快照。AIMessage.tool_calls 触发 tool.start;
-                # ToolMessage 触发 tool.done。
+            elif method == "values":
+                # values 通道：节点结束的完整状态快照。AIMessage.tool_calls 触发
+                # tool.start；ToolMessage 触发 tool.done（去重由 seen_* 保证）。
                 async for event_name, payload in self._handle_node_update(
-                    raw_data,
+                    data,
                     state=state,
                     assistant_message_id=assistant_message_id,
                     version_id=version_id,
@@ -149,7 +149,7 @@ class AgentStreamService:
     # ---- handlers ----
 
     @staticmethod
-    async def _handle_message_chunk(
+    async def _handle_messages_data(
         raw_data: Any,
         *,
         state: StreamRunState,
@@ -157,30 +157,60 @@ class AgentStreamService:
         version_id: str,
         on_assistant_text_chunk: Callable[[str], None] | None,
     ):
-        """处理 ``messages`` 流事件: 仅消费 AIMessageChunk,转化为 part.delta。"""
-        message_chunk, _meta = _extract_ai_chunk_event(raw_data)
-        if message_chunk is None:
-            return  # tools 节点的 ToolMessage 等其他形态在此忽略
+        """处理 messages 通道事件：content-block 增量转化为 part.delta。"""
+        for item in _iter_messages_data(raw_data):
+            event_type = str(item.get("event", ""))
+            if event_type != "content-block-delta":
+                continue
 
-        # 累积 chunk(便于后续抽取累积态的 reasoning_content 等)
-        if state.accumulated_chunk is None:
-            state.accumulated_chunk = message_chunk
-        else:
-            state.accumulated_chunk = state.accumulated_chunk + message_chunk
+            delta = item.get("delta") or {}
+            delta_type = str(delta.get("type", ""))
 
-        # TTS 等下游需要拿"用户可见文本"的逐字流
-        if on_assistant_text_chunk is not None:
-            chunk_text = _content_to_text(message_chunk.content)
-            if chunk_text.strip():
-                on_assistant_text_chunk(chunk_text)
+            if delta_type == "text-delta":
+                delta_text = str(delta.get("text", "") or "")
+                if not delta_text:
+                    continue
+                state.assistant_text += delta_text
+                # TTS 等下游需要拿"用户可见文本"的逐字流
+                if on_assistant_text_chunk is not None and delta_text.strip():
+                    on_assistant_text_chunk(delta_text)
+                for payload in _text_delta_payloads(
+                    state,
+                    part_type="text",
+                    delta=delta_text,
+                    assistant_message_id=assistant_message_id,
+                    version_id=version_id,
+                ):
+                    yield "part.delta", payload.model_dump()
 
-        for delta_payload in _chunk_to_part_deltas(
-            state,
-            assistant_message_id=assistant_message_id,
-            version_id=version_id,
-            chunk=message_chunk,
-        ):
-            yield "part.delta", delta_payload.model_dump()
+            elif delta_type == "reasoning-delta":
+                delta_text = str(delta.get("reasoning", "") or "")
+                if not delta_text:
+                    continue
+                state.reasoning_text += delta_text
+                for payload in _text_delta_payloads(
+                    state,
+                    part_type="reasoning",
+                    delta=delta_text,
+                    assistant_message_id=assistant_message_id,
+                    version_id=version_id,
+                ):
+                    yield "part.delta", payload.model_dump()
+
+            elif delta_type == "block-delta":
+                # 提供方私有增量（如 Qwen reasoning_content）经 fields 透传
+                fields = delta.get("fields") or {}
+                reasoning_text = fields.get("reasoning_content") or fields.get("reasoning")
+                if isinstance(reasoning_text, str) and reasoning_text:
+                    state.reasoning_text += reasoning_text
+                    for payload in _text_delta_payloads(
+                        state,
+                        part_type="reasoning",
+                        delta=reasoning_text,
+                        assistant_message_id=assistant_message_id,
+                        version_id=version_id,
+                    ):
+                        yield "part.delta", payload.model_dump()
 
     @staticmethod
     async def _handle_node_update(
@@ -190,7 +220,7 @@ class AgentStreamService:
         assistant_message_id: str,
         version_id: str,
     ):
-        """处理 ``updates`` 流事件: 从节点结束快照中提取工具调用 / 工具返回。"""
+        """处理 values 通道事件: 从节点结束快照中提取工具调用 / 工具返回。"""
         for event_type, _, trace in _extract_tool_events(
             raw_data,
             seen_called=state.seen_called,
@@ -233,29 +263,15 @@ class AgentStreamService:
 # ---------------------------------------------------------------------------
 
 
-def _extract_ai_chunk_event(payload: Any) -> tuple[AIMessageChunk | None, dict[str, Any]]:
-    """从 LangGraph ``messages`` 事件中提取 ``AIMessageChunk`` 与元信息。
+def _iter_messages_data(raw_data: Any) -> list[dict[str, Any]]:
+    """把 messages 通道事件的 data 归一化为 MessagesData dict 列表。
 
-    LangGraph 将 ``messages`` 事件打包为 ``(message, metadata)`` 元组。我们只关心
-    AIMessageChunk(LLM token),其它消息类型(ToolMessage 等)在此忽略 —— 它们
-    的完整快照已经由 ``updates`` 阶段处理。
+    实测协议形状为二元组 ``(MessagesData, metadata)``（v3 在 v2 消息元组外保留了
+    metadata 位）；文档示例中也有直接给 dict 列表的形态。两种都兼容：
+    逐个元素取带 ``event`` 字段的 dict，其余（如完整的 AIMessage 快照）忽略。
     """
-    if isinstance(payload, AIMessageChunk):
-        return payload, {}
-
-    if not isinstance(payload, tuple):
-        return None, {}
-
-    chunk: AIMessageChunk | None = None
-    metadata: dict[str, Any] = {}
-    for item in payload:
-        if isinstance(item, AIMessageChunk) and chunk is None:
-            chunk = item
-            continue
-        if isinstance(item, dict):
-            metadata.update(item)
-
-    return chunk, metadata
+    items: list[Any] = list(raw_data) if isinstance(raw_data, (tuple, list)) else [raw_data]
+    return [item for item in items if isinstance(item, dict) and "event" in item]
 
 
 def _extract_tool_events(
@@ -329,42 +345,27 @@ def _iter_base_messages(payload: Any):
 # ---------------------------------------------------------------------------
 
 
-def _chunk_to_part_deltas(
+def _text_delta_payloads(
     state: StreamRunState,
     *,
+    part_type: str,
+    delta: str,
     assistant_message_id: str,
     version_id: str,
-    chunk: AIMessageChunk,
 ) -> list[PartDeltaPayload]:
-    """把 AI chunk 转换为前端 UI text/reasoning 增量。"""
+    """把一段 text / reasoning 增量转换为前端 UI part.delta 序列。"""
     payloads: list[PartDeltaPayload] = []
-    reasoning_text = _message_reasoning_text(chunk)
-    if reasoning_text:
-        part, sealed = _append_text_like_part(state, part_type="reasoning", delta=reasoning_text)
-        payloads.extend(_seal_payloads(sealed, assistant_message_id, version_id))
-        payloads.append(
-            PartDeltaPayload(
-                message_id=assistant_message_id,
-                version_id=version_id,
-                part_id=part.id,
-                part_type="reasoning",
-                text_delta=reasoning_text,
-            )
+    part, sealed = _append_text_like_part(state, part_type=part_type, delta=delta)
+    payloads.extend(_seal_payloads(sealed, assistant_message_id, version_id))
+    payloads.append(
+        PartDeltaPayload(
+            message_id=assistant_message_id,
+            version_id=version_id,
+            part_id=part.id,
+            part_type=part_type,
+            text_delta=delta,
         )
-
-    chunk_text = _content_to_text(chunk.content)
-    if chunk_text:
-        part, sealed = _append_text_like_part(state, part_type="text", delta=chunk_text)
-        payloads.extend(_seal_payloads(sealed, assistant_message_id, version_id))
-        payloads.append(
-            PartDeltaPayload(
-                message_id=assistant_message_id,
-                version_id=version_id,
-                part_id=part.id,
-                part_type="text",
-                text_delta=chunk_text,
-            )
-        )
+    )
     return payloads
 
 
@@ -497,29 +498,6 @@ def _trace_to_tool_part_payload(
         existing.cards = cards
 
     return ToolPartPayload(message_id=assistant_message_id, version_id=version_id, part=existing)
-
-
-def _message_reasoning_text(message: AIMessage | AIMessageChunk | None) -> str:
-    if message is None:
-        return ""
-    reasoning_from_kwargs = message.additional_kwargs.get("reasoning_content")
-    if isinstance(reasoning_from_kwargs, str) and reasoning_from_kwargs:
-        return reasoning_from_kwargs
-    content = message.content
-    if not isinstance(content, list):
-        return ""
-    chunks: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type not in {"reasoning", "reasoning_content"}:
-            continue
-        for key in ("reasoning", "reasoning_content", "text"):
-            value = item.get(key)
-            if isinstance(value, str) and value:
-                chunks.append(value)
-    return "".join(chunks)
 
 
 def _stable_call_key(tool_name: str, args: Any) -> str:

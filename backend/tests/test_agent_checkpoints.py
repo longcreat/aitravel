@@ -139,7 +139,7 @@ async def test_rollback_thread_prunes_after_latest_persisted_checkpoint() -> Non
     await service.rollback_thread("user-1", "thread-1")
 
     assert chat_store.set_calls == [("user-1", "thread-1", "cp-persisted")]
-    assert checkpointer.setup_called is True
+    # schema 由 startup 时的 checkpointer.setup() 一次性建好，prune 不再重复调用
     assert checkpointer.conn.committed is True
     cursor = checkpointer.conn.cursors[0]
     assert cursor.executed[0][1] == ("thread-1", "cp-persisted")

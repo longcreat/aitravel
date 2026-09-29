@@ -346,7 +346,8 @@ class TravelAgentService:
                 raise
 
         final_response = build_final_response(
-            accumulated_chunk=state.accumulated_chunk,
+            assistant_text=state.assistant_text,
+            reasoning_text=state.reasoning_text,
             streamed_tool_traces=state.streamed_tool_traces,
             runtime=self._runtime_service.require_runtime(),
         )
@@ -455,9 +456,9 @@ class TravelAgentService:
                 await self.rollback_thread(user_id, request.thread_id)
                 stopped_status = "stopped" if is_cancelled else "failed"
                 stopped_text = (
-                    _content_to_text(state.accumulated_chunk.content).strip()
-                    if state.accumulated_chunk else ""
-                ) if is_cancelled else "当前请求失败，可能是网络或后端服务异常。"
+                    state.assistant_text.strip() if is_cancelled
+                    else "当前请求失败，可能是网络或后端服务异常。"
+                )
                 stopped_parts = (
                     _finalize_ui_parts(state.ui_parts, stopped_text, None)
                     if is_cancelled and state.ui_parts
@@ -482,7 +483,8 @@ class TravelAgentService:
                 raise
 
         final_response = build_final_response(
-            accumulated_chunk=state.accumulated_chunk,
+            assistant_text=state.assistant_text,
+            reasoning_text=state.reasoning_text,
             streamed_tool_traces=state.streamed_tool_traces,
             runtime=self._runtime_service.require_runtime(),
         )

@@ -132,23 +132,12 @@ class AgentRuntimeService:
         )
 
     async def shutdown(self) -> None:
-        """关闭 MCP 客户端与 SQLite checkpointer。"""
+        """关闭 SQLite checkpointer。
+
+        MCP 工具自带客户端、按调用自开会话（langchain.mcp 语义），无需统一关闭。
+        """
         if self._runtime is None:
             return
-
-        clients = self._runtime.mcp_bundle.clients or (
-            [self._runtime.mcp_bundle.client] if self._runtime.mcp_bundle.client else []
-        )
-        seen_client_ids: set[int] = set()
-        for client in clients:
-            if client is None or id(client) in seen_client_ids:
-                continue
-            seen_client_ids.add(id(client))
-            close_method = getattr(client, "close", None)
-            if close_method:
-                maybe_result = close_method()
-                if hasattr(maybe_result, "__await__"):
-                    await maybe_result
 
         await self._runtime.checkpointer.conn.close()
         self._runtime = None

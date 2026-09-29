@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.runtime import AgentRuntime
 from app.schemas.chat import (
@@ -16,13 +16,14 @@ from app.schemas.chat import (
 
 def build_final_response(
     *,
-    accumulated_chunk: AIMessageChunk | None,
+    assistant_text: str,
+    reasoning_text: str,
     streamed_tool_traces: list[ToolTrace],
     runtime: AgentRuntime,
 ) -> ChatInvokeResponse:
     """根据流式累计结果构建最终响应对象。"""
-    assistant_from_chunk = _content_to_text(accumulated_chunk.content).strip() if accumulated_chunk else ""
-    reasoning_from_chunk = _message_reasoning_text(accumulated_chunk).strip() if accumulated_chunk else ""
+    assistant_from_chunk = assistant_text.strip()
+    reasoning_from_chunk = reasoning_text.strip()
 
     return ChatInvokeResponse(
         assistant_message=assistant_from_chunk,
@@ -74,18 +75,6 @@ def _reasoning_blocks_to_text(content: Any) -> str:
             chunks.append(text)
 
     return "".join(chunks).strip()
-
-
-def _message_reasoning_text(message: AIMessage | AIMessageChunk | None) -> str:
-    """从单条 AI 消息中提取 reasoning 文本。"""
-    if message is None:
-        return ""
-
-    reasoning_content = getattr(message, "additional_kwargs", {}).get("reasoning_content")
-    if isinstance(reasoning_content, str) and reasoning_content.strip():
-        return reasoning_content.strip()
-
-    return _reasoning_blocks_to_text(getattr(message, "content", None))
 
 
 def _content_to_text(content: Any) -> str:
