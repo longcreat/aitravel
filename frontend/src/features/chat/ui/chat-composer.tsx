@@ -58,6 +58,24 @@ export function ChatComposer({
     }
   }, [value]);
 
+  // 录音期间抑制系统长按行为（文本选择/智能助手弹窗）：国产安卓浏览器的
+  // 长按弹窗会抢走指针事件，把正在进行的录音直接打断。
+  const voiceActive = voice.status === "recording" || voice.status === "starting";
+  useEffect(() => {
+    if (!voiceActive) {
+      return;
+    }
+    document.body.classList.add("voice-recording");
+    const prevent = (event: Event) => event.preventDefault();
+    document.addEventListener("contextmenu", prevent, true);
+    document.addEventListener("selectstart", prevent, true);
+    return () => {
+      document.body.classList.remove("voice-recording");
+      document.removeEventListener("contextmenu", prevent, true);
+      document.removeEventListener("selectstart", prevent, true);
+    };
+  }, [voiceActive]);
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     const text = value.trim();
@@ -127,8 +145,6 @@ export function ChatComposer({
     setArmed(false);
   }
 
-  // starting 与 recording 视觉合并：按下即进入录音态，建连过程（<300ms）对用户无感
-  const voiceActive = voice.status === "recording" || voice.status === "starting";
   const voiceCancelHint = voiceActive && cancelArmed;
 
   return (

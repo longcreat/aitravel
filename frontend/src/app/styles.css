@@ -161,6 +161,15 @@ textarea {
   animation: voice-eq 0.9s ease-in-out infinite;
 }
 
+/* 录音期间抑制系统长按行为：文本选择、长按菜单、智能助手弹窗
+   （国产安卓浏览器的长按弹窗会抢走指针事件打断录音） */
+.voice-recording,
+.voice-recording * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  -webkit-touch-callout: none !important;
+}
+
 /* Citation chips */
 .citation-chip {
   display: inline-flex;
