@@ -7,6 +7,7 @@
     "dev": "vite",
     "dev:backend": "cd ..\\backend && uv run --frozen uvicorn app.main:create_app --factory --reload --reload-dir app --reload-dir config --host localhost --port 8000",
     "build": "tsc -b && vite build",
+    "deploy": "tsc -b && vite build && npx wrangler pages deploy dist --project-name=aitravel --branch=main --commit-dirty=true",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"

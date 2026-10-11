@@ -56,14 +56,22 @@ copy .env.example .env
 uv run --frozen --env-file .env uvicorn app.main:create_app --factory --reload --reload-dir app --reload-dir config --host localhost --port 8000
 ```
 
-## 前端启动
+## 前端启动与部署
 
-```bash
+本地开发：
+`ash
 cd frontend
 npm install
 copy .env.example .env
 npm run dev
-```
+`
+
+生产部署（Cloudflare Pages 全球 CDN）：
+`ash
+cd frontend
+npm run deploy
+`
+*线上地址：https://travel.aigoway.tech（通过 Pages Functions 自动将 /api/* 反代至后端 https://api.aigoway.tech，严禁将前端直接传至阿里云服务器）。*
 
 ## MCP 配置
 
