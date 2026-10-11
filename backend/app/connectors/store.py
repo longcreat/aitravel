@@ -232,6 +232,23 @@ class ConnectorAuthStore:
                 (error[:500], now, authorization_id),
             )
 
+    def mark_expired(self, authorization_id: str, error: str) -> None:
+        """token 刷新失败等凭证过期场景：状态置为 expired，用户需重新授权。
+
+        与 `failed`（授权流程中出错）区分开，前端可给出"已过期，请重新连接"的
+        定向提示。
+        """
+        now = _utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE user_mcp_authorizations
+                SET status = 'expired', last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (error[:500], now, authorization_id),
+            )
+
     def mark_revoked(self, authorization_id: str) -> None:
         """断开授权：清空 token 并将状态置为 revoked。"""
         now = _utc_now_iso()

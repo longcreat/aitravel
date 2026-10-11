@@ -65,6 +65,8 @@ class AgentRuntimeService:
         self._mcp_config_path = mcp_config_path
         self._sqlite_db_path = sqlite_db_path
         self._runtime: AgentRuntime | None = None
+        # 用户级 agent 缓存：key = connector 签名（见 build_user_agent）
+        self._user_agent_cache: dict[str, Any] = {}
 
     @property
     def runtime(self) -> AgentRuntime | None:
@@ -114,12 +116,25 @@ class AgentRuntimeService:
             default_profile_key=default_profile_key,
         )
 
-    def build_user_agent(self, extra_tools: list[Any]) -> Any:
-        """基于全局组件按需构建一个挂载了用户级 MCP 工具的 agent。"""
+    def build_user_agent(self, extra_tools: list[Any], *, signature: str = "") -> Any:
+        """基于全局组件构建挂载了用户级 MCP 工具的 agent。
+
+        带 signature（connector 集合 + 凭证版本编码）时按签名缓存：同一用户
+        连续对话不再每个请求重建 agent 图（编译 + 中间件栈 + 模型绑定都是纯
+       开销）；connector 连接/断开或 token 刷新会使签名变化而自然失效。
+        缓存无 TTL，依赖签名保证新鲜度；条目数上限防止无界增长。
+        """
         runtime = self.require_runtime()
         if not extra_tools:
             return runtime.agent
-        return create_agent(
+
+        cache_key = signature or str(id(extra_tools))
+        if signature:
+            cached = self._user_agent_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        agent = create_agent(
             model=runtime.default_model,
             tools=[*runtime.local_tools, *runtime.mcp_bundle.tools, *extra_tools],
             context_schema=AgentRequestContext,
@@ -130,6 +145,13 @@ class AgentRuntimeService:
             checkpointer=runtime.checkpointer,
             store=runtime.store,
         )
+        if signature:
+            self._user_agent_cache[cache_key] = agent
+            # 上限保护：签名失效的旧条目没有显式驱逐时机，超限时整表清空
+            # （冷缓存重建成本低，正确性不受影响）
+            if len(self._user_agent_cache) > 256:
+                self._user_agent_cache.clear()
+        return agent
 
     async def shutdown(self) -> None:
         """关闭 SQLite checkpointer。

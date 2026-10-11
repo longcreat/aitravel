@@ -307,7 +307,10 @@ class TravelAgentService:
         ):
             try:
                 async with self._user_tools_context(user_id) as user_tools_bundle:
-                    user_agent = self._runtime_service.build_user_agent(user_tools_bundle.tools)
+                    user_agent = self._runtime_service.build_user_agent(
+                        user_tools_bundle.tools,
+                        signature=getattr(user_tools_bundle, "signature", ""),
+                    )
                     async for event_name, event_payload in self._stream_service.stream_agent_run(
                         thread_id=thread_id,
                         agent_input={"messages": [HumanMessage(content=target.user_message_text)]},
@@ -350,6 +353,8 @@ class TravelAgentService:
             reasoning_text=state.reasoning_text,
             streamed_tool_traces=state.streamed_tool_traces,
             runtime=self._runtime_service.require_runtime(),
+            connector_servers=user_tools_bundle.connected_servers,
+            connector_errors=user_tools_bundle.errors,
         )
         result_checkpoint_id = await self._checkpoint_service.get_latest_checkpoint_id(thread_id)
         try:
@@ -422,7 +427,10 @@ class TravelAgentService:
         ):
             try:
                 async with self._user_tools_context(user_id) as user_tools_bundle:
-                    user_agent = self._runtime_service.build_user_agent(user_tools_bundle.tools)
+                    user_agent = self._runtime_service.build_user_agent(
+                        user_tools_bundle.tools,
+                        signature=getattr(user_tools_bundle, "signature", ""),
+                    )
                     async for event_name, event_payload in self._stream_service.stream_agent_run(
                         thread_id=request.thread_id,
                         agent_input={"messages": [HumanMessage(content=request.user_message)]},
@@ -487,6 +495,8 @@ class TravelAgentService:
             reasoning_text=state.reasoning_text,
             streamed_tool_traces=state.streamed_tool_traces,
             runtime=self._runtime_service.require_runtime(),
+            connector_servers=user_tools_bundle.connected_servers,
+            connector_errors=user_tools_bundle.errors,
         )
         result_checkpoint_id = await self._checkpoint_service.get_latest_checkpoint_id(request.thread_id)
         try:
@@ -528,3 +538,4 @@ class _EmptyUserTools:
     tools: list[Any] = []
     connected_servers: list[str] = []
     errors: list[str] = []
+    signature: str = ""

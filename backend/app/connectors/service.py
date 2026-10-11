@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -81,6 +82,16 @@ class ConnectorService:
         # 前端 return_url 决定授权完成后跳回哪里。两者都不允许静默回退到 localhost。
         self._redirect_uri = _require_env("CONNECTOR_REDIRECT_URL")
         self._frontend_return_url = _require_env("CONNECTOR_FRONTEND_RETURN_URL")
+        # 凭证版本：任何 token 写入/刷新/吊销都递增。build_user_agent 以
+        # (user, connector 集合, version) 作为缓存签名，凭证变化即失效重建。
+        self._credentials_version = 0
+
+    def credentials_version(self) -> int:
+        """当前凭证版本号（agent 构建缓存签名的一部分）。"""
+        return self._credentials_version
+
+    def _bump_credentials_version(self) -> None:
+        self._credentials_version += 1
 
     # ---- public API ----
 
@@ -234,6 +245,7 @@ class ConnectorService:
         record = self._store.get_for_user(user_id, connector_id)
         if record is not None:
             self._store.mark_revoked(record.id)
+            self._bump_credentials_version()
         # 重新读取一次，构建对外结果
         refreshed = self._store.get_for_user(user_id, connector_id)
         return self._compose_state(definition, refreshed)
@@ -243,31 +255,40 @@ class ConnectorService:
     ) -> list[tuple[ConnectorDefinition, AuthorizationRow, str]]:
         """返回该用户当前可用的 connector 三元组：(definition, row, access_token)。
 
-        这一步会按需刷新 token；刷新失败的会被标记为 expired 并被排除。
+        这一步会并行按需刷新 token；刷新失败的会被标记为 expired 并被排除。
         """
         connections = self._store.list_connected(user_id)
         if not connections:
             return []
 
-        results: list[tuple[ConnectorDefinition, AuthorizationRow, str]] = []
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            for row in connections:
-                definition = self._registry.get(row.connector_id)
-                if definition is None:
-                    continue
+            entries: list[tuple[ConnectorDefinition, AuthorizationRow]] = [
+                (definition, row)
+                for row in connections
+                if (definition := self._registry.get(row.connector_id)) is not None
+            ]
+
+            async def _refresh(entry: tuple[ConnectorDefinition, AuthorizationRow]) -> str | None:
+                definition, row = entry
                 try:
-                    access_token = await self._ensure_fresh_token(row, definition, client=client)
-                except Exception as exc:
+                    return await self._ensure_fresh_token(row, definition, client=client)
+                except Exception as exc:  # noqa: BLE001 - 单个失败不阻塞其他
                     logger.warning(
                         "Failed to refresh token for user=%s connector=%s: %s",
                         user_id,
                         row.connector_id,
                         exc,
                     )
-                    self._store.mark_failed(row.id, f"刷新 access token 失败：{exc}")
-                    continue
-                refreshed = self._store.get_by_id(row.id) or row
-                results.append((definition, refreshed, access_token))
+                    self._store.mark_expired(row.id, f"刷新 access token 失败：{exc}")
+                    return None
+
+            tokens = await asyncio.gather(*(_refresh(entry) for entry in entries))
+
+        results = [
+            (definition, self._store.get_by_id(row.id) or row, token)
+            for (definition, row), token in zip(entries, tokens, strict=True)
+            if token is not None
+        ]
         return results
 
     # ---- internals ----
@@ -344,6 +365,7 @@ class ConnectorService:
             scope=token.scope,
             expires_at=token.expires_at_iso(),
         )
+        self._bump_credentials_version()
 
     async def _ensure_fresh_token(
         self,

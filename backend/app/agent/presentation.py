@@ -20,8 +20,14 @@ def build_final_response(
     reasoning_text: str,
     streamed_tool_traces: list[ToolTrace],
     runtime: AgentRuntime,
+    connector_servers: list[str] | None = None,
+    connector_errors: list[str] | None = None,
 ) -> ChatInvokeResponse:
-    """根据流式累计结果构建最终响应对象。"""
+    """根据流式累计结果构建最终响应对象。
+
+    connector_servers / connector_errors：用户级 connector 的加载结果，
+    与全局 MCP 一并列进 meta（前端与排查都能看到"我的连接为什么没生效"）。
+    """
     assistant_from_chunk = assistant_text.strip()
     reasoning_from_chunk = reasoning_text.strip()
 
@@ -31,8 +37,8 @@ def build_final_response(
             tool_traces=streamed_tool_traces,
             reasoning_text=reasoning_from_chunk or None,
             reasoning_state="completed" if reasoning_from_chunk else None,
-            mcp_connected_servers=runtime.mcp_bundle.connected_servers,
-            mcp_errors=runtime.mcp_bundle.errors,
+            mcp_connected_servers=[*runtime.mcp_bundle.connected_servers, *(connector_servers or [])],
+            mcp_errors=[*runtime.mcp_bundle.errors, *(connector_errors or [])],
         ),
     )
 
