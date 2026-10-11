@@ -70,11 +70,10 @@ def _patch_assembly(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeStdioGroup.instances.clear()
 
 
-def _fake_client_ctor(transport):
-    client = SimpleNamespace(_transport=transport)
+def _fake_client_ctor(transport, mode=None, **kwargs):
+    client = SimpleNamespace(_transport=transport, _mode=mode)
     if isinstance(transport, SimpleNamespace):
         client._auth_marker = getattr(transport, "auth", None)
-        client._transport_kind = getattr(transport, "kind", "?")
     return client
 
 

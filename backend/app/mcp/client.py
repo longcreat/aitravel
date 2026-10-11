@@ -79,9 +79,9 @@ class ServerSpec:
     env: dict[str, str] | None = None
 
     def to_fastmcp_client(self) -> FastMCPClient:
-        """按 spec 构建 fastmcp Client（凭证挂在 client 上）。"""
+        """按 spec 构建 fastmcp Client（凭证与协议时代都挂在 client 上）。"""
         if self.command is not None:
-            return FastMCPClient(self._stdio_transport())
+            return FastMCPClient(self._stdio_transport(), mode=self.mode)
         assert self.url is not None, "http server spec requires url"
 
         from fastmcp.client.transports import (
@@ -95,13 +95,16 @@ class ServerSpec:
             # 官方 per-user auth 模式：token 挂在 client/transport 上，
             # 由 fastmcp 注入 Authorization 头
             if transport_type == "sse":
-                return FastMCPClient(SSETransport(self.url, auth=self.auth))
+                return FastMCPClient(SSETransport(self.url, auth=self.auth), mode=self.mode)
             return FastMCPClient(
-                StreamableHttpTransport(self.url, headers=headers, auth=self.auth)
+                StreamableHttpTransport(self.url, headers=headers, auth=self.auth),
+                mode=self.mode,
             )
         if transport_type == "sse":
-            return FastMCPClient(SSETransport(self.url, headers=headers))
-        return FastMCPClient(StreamableHttpTransport(self.url, headers=headers))
+            return FastMCPClient(SSETransport(self.url, headers=headers), mode=self.mode)
+        return FastMCPClient(
+            StreamableHttpTransport(self.url, headers=headers), mode=self.mode
+        )
 
     def _stdio_transport(self):
         from fastmcp.client.transports import StdioTransport
