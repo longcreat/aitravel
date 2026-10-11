@@ -36,6 +36,11 @@ from langchain.mcp import MCPAdapter
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PROTOCOL_MODE = "legacy"
+# 单次工具调用超时：MCP 服务器 stdout 被污染（如 amap 打印非 JSON 调试行）时
+# 响应行会被解析器丢弃、请求 future 永远等不到结果 —— 没有超时的话整轮对话
+# 会无限挂起（前端工具卡片永远转圈）。超时后异常经 ToolErrorMiddleware 变成
+# error ToolMessage，模型可重试或换工具作答。
+_DEFAULT_TOOL_TIMEOUT_S = 60.0
 
 
 @dataclass
@@ -77,11 +82,13 @@ class ServerSpec:
     command: str | None = None
     args: list[str] | None = None
     env: dict[str, str] | None = None
+    timeout: float | None = None  # 单次工具调用超时（秒）；None → 默认 60s
 
     def to_fastmcp_client(self) -> FastMCPClient:
-        """按 spec 构建 fastmcp Client（凭证与协议时代都挂在 client 上）。"""
+        """按 spec 构建 fastmcp Client（凭证、协议时代与超时都挂在 client 上）。"""
+        timeout = self.timeout or _DEFAULT_TOOL_TIMEOUT_S
         if self.command is not None:
-            return FastMCPClient(self._stdio_transport(), mode=self.mode)
+            return FastMCPClient(self._stdio_transport(), mode=self.mode, timeout=timeout)
         assert self.url is not None, "http server spec requires url"
 
         from fastmcp.client.transports import (
@@ -95,15 +102,22 @@ class ServerSpec:
             # 官方 per-user auth 模式：token 挂在 client/transport 上，
             # 由 fastmcp 注入 Authorization 头
             if transport_type == "sse":
-                return FastMCPClient(SSETransport(self.url, auth=self.auth), mode=self.mode)
+                return FastMCPClient(
+                    SSETransport(self.url, auth=self.auth), mode=self.mode, timeout=timeout
+                )
             return FastMCPClient(
                 StreamableHttpTransport(self.url, headers=headers, auth=self.auth),
                 mode=self.mode,
+                timeout=timeout,
             )
         if transport_type == "sse":
-            return FastMCPClient(SSETransport(self.url, headers=headers), mode=self.mode)
+            return FastMCPClient(
+                SSETransport(self.url, headers=headers), mode=self.mode, timeout=timeout
+            )
         return FastMCPClient(
-            StreamableHttpTransport(self.url, headers=headers), mode=self.mode
+            StreamableHttpTransport(self.url, headers=headers),
+            mode=self.mode,
+            timeout=timeout,
         )
 
     def _stdio_transport(self):
@@ -154,7 +168,7 @@ async def assemble_mcp_tools(specs: list[ServerSpec]) -> MCPToolBundle:
 # 旧入口保留：全局 mcp.servers.json 配置 → ServerSpec
 # ---------------------------------------------------------------------------
 
-_ENTRY_KEYS = {"url", "command", "args", "env", "headers", "mode", "transport"}
+_ENTRY_KEYS = {"url", "command", "args", "env", "headers", "mode", "transport", "timeout"}
 
 
 def _entry_to_spec(name: str, connection: dict[str, Any]) -> ServerSpec:
@@ -163,6 +177,7 @@ def _entry_to_spec(name: str, connection: dict[str, Any]) -> ServerSpec:
     transport = entry.get("transport")
     if transport == "http":
         transport = None  # 归一化别名：由 URL 推断 streamable_http
+    timeout = entry.get("timeout")
     return ServerSpec(
         name=name,
         url=entry.get("url"),
@@ -172,6 +187,7 @@ def _entry_to_spec(name: str, connection: dict[str, Any]) -> ServerSpec:
         command=entry.get("command"),
         args=entry.get("args"),
         env=entry.get("env"),
+        timeout=float(timeout) if timeout is not None else None,
     )
 
 

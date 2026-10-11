@@ -217,6 +217,12 @@ def test_entry_to_spec_normalizes_and_defaults(monkeypatch) -> None:
     assert stdio_spec.command == "uvx"
     assert stdio_spec.args == ["a"]
 
+    # 单次工具调用超时可配置；缺省时装配层用 60s 默认
+    timed = _entry_to_spec("t", {"transport": "streamable_http", "url": "https://x/mcp", "timeout": 15})
+    assert timed.timeout == 15.0
+    untimed = _entry_to_spec("t2", {"transport": "streamable_http", "url": "https://x/mcp"})
+    assert untimed.timeout is None
+
 
 @pytest.mark.asyncio
 async def test_discovery_uses_cache(monkeypatch) -> None:
