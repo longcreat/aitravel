@@ -98,23 +98,39 @@ class AgentStreamService:
         queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
 
         async def consume_messages() -> None:
+            # 按到达顺序消费每条消息的原始 content-block 事件。
+            # 不能先串行消费完 reasoning 投影再消费 text 投影：reasoning 投影
+            # 要到消息结束才收尾，会把 text 增量积压成消息结束后的一次性回放，
+            # 流式输出即告丢失。
             async for message in stream.messages:
-                async for delta in message.reasoning:
-                    if delta:
-                        state.reasoning_text += delta
-                        for payload in self._text_delta_payloads(
-                            state, "reasoning", delta, assistant_message_id, version_id
-                        ):
-                            await queue.put(("part.delta", payload.model_dump()))
-                async for delta in message.text:
-                    if delta:
-                        state.assistant_text += delta
-                        if on_assistant_text_chunk is not None and delta.strip():
-                            on_assistant_text_chunk(delta)
-                        for payload in self._text_delta_payloads(
-                            state, "text", delta, assistant_message_id, version_id
-                        ):
-                            await queue.put(("part.delta", payload.model_dump()))
+                async for event in message:
+                    if not isinstance(event, dict) or event.get("event") != "content-block-delta":
+                        continue
+                    delta = event.get("delta") or {}
+                    delta_type = delta.get("type")
+                    if delta_type == "text-delta":
+                        text = str(delta.get("text", "") or "")
+                        if text:
+                            await self._emit_text(
+                                state, queue, "text", text,
+                                assistant_message_id, version_id, on_assistant_text_chunk,
+                            )
+                    elif delta_type == "reasoning-delta":
+                        text = str(delta.get("reasoning", "") or "")
+                        if text:
+                            await self._emit_text(
+                                state, queue, "reasoning", text,
+                                assistant_message_id, version_id, None,
+                            )
+                    elif delta_type == "block-delta":
+                        # 提供方私有增量（如 Qwen reasoning_content）经 fields 透传
+                        fields = delta.get("fields") or {}
+                        text = fields.get("reasoning_content") or fields.get("reasoning")
+                        if isinstance(text, str) and text:
+                            await self._emit_text(
+                                state, queue, "reasoning", text,
+                                assistant_message_id, version_id, None,
+                            )
 
         async def consume_tool_calls() -> None:
             async for call in stream.tool_calls:
@@ -211,6 +227,26 @@ class AgentStreamService:
             )
         )
         return payloads
+
+    async def _emit_text(
+        self,
+        state: StreamRunState,
+        queue: asyncio.Queue,
+        part_type: str,
+        delta: str,
+        message_id: str,
+        version_id: str,
+        tts_cb: Callable[[str], None] | None,
+    ) -> None:
+        """累计一段增量并即时下发 part.delta（流式输出的唯一出口）。"""
+        if part_type == "text":
+            state.assistant_text += delta
+            if tts_cb is not None and delta.strip():
+                tts_cb(delta)
+        else:
+            state.reasoning_text += delta
+        for payload in self._text_delta_payloads(state, part_type, delta, message_id, version_id):
+            await queue.put(("part.delta", payload.model_dump()))
 
     @staticmethod
     def _upsert_tool_part(state: StreamRunState, trace: ToolTrace) -> ChatToolPart:
