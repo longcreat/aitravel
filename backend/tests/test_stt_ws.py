@@ -25,45 +25,46 @@ class _NoopAgentService:
         return {"ready": False, "mcp_connected_servers": [], "mcp_errors": [], "local_tools": [], "mcp_tools": []}
 
 
-class _FakeSentence:
-    def __init__(self, text: str, sentence_end: bool) -> None:
-        self._text = text
-        self._sentence_end = sentence_end
+class _FakeOmniConversation:
+    """按真实 OmniRealtimeConversation 接口的最小 fake。
 
-    def get_sentence(self):
-        return {"text": self._text}
+    connect 同步回调 on_open；commit 回放一次最终识别结果；close 回调 on_close。
+    """
 
-    def is_sentence_end(self) -> bool:
-        return self._sentence_end
+    instances: list["_FakeOmniConversation"] = []
 
-
-class _FakeRecognition:
-    """按真实 SDK 接口的最小 fake：start 同步回调 on_open，stop 回放一次识别结果。"""
-
-    instances: list["_FakeRecognition"] = []
-
-    def __init__(self, model: str, callback, format: str, sample_rate: int, **kwargs) -> None:  # noqa: A002
+    def __init__(self, model: str, callback, **kwargs) -> None:
         self.model = model
         self.callback = callback
-        self.format = format
-        self.sample_rate = sample_rate
         self.kwargs = kwargs
-        self.audio_frames: list[bytes] = []
-        self.started = False
-        self.stopped = False
-        _FakeRecognition.instances.append(self)
+        self.audio_frames: list[str] = []
+        self.committed = False
+        self.closed = False
+        _FakeOmniConversation.instances.append(self)
 
-    def start(self, phrase_id: str | None = None, **kwargs) -> None:
-        self.started = True
+    def connect(self) -> None:
         self.callback.on_open()
 
-    def send_audio_frame(self, buffer: bytes) -> None:
-        self.audio_frames.append(buffer)
+    def update_session(self, **kwargs) -> None:
+        self.session_kwargs = kwargs
 
-    def stop(self) -> None:
-        self.stopped = True
-        self.callback.on_event(_FakeSentence("我想去北京", True))
-        self.callback.on_complete()
+    def append_audio(self, audio_b64: str) -> None:
+        self.audio_frames.append(audio_b64)
+
+    def commit(self) -> None:
+        self.committed = True
+        self.callback.on_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "我想去北京",
+            }
+        )
+
+    def end_session_async(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
         self.callback.on_close()
 
 
@@ -81,8 +82,8 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr("app.auth.service.AuthService._send_email", lambda self, **_kwargs: None)
     monkeypatch.setenv("ALIYUN_STT_API_KEY", "test-stt-key")
 
-    _FakeRecognition.instances.clear()
-    monkeypatch.setattr("dashscope.audio.asr.Recognition", _FakeRecognition)
+    _FakeOmniConversation.instances.clear()
+    monkeypatch.setattr("app.speech.stt.OmniRealtimeConversation", _FakeOmniConversation)
 
     for dependency in (deps.get_auth_service, deps.get_agent_service, deps.get_payment_service):
         dependency.cache_clear()
@@ -140,7 +141,9 @@ def test_stt_ws_full_flow(client: TestClient) -> None:
 
         websocket.send_bytes(audio)
         time.sleep(0.05)
-        assert _FakeRecognition.instances[0].audio_frames == [audio]
+        import base64
+
+        assert base64.b64decode(_FakeOmniConversation.instances[0].audio_frames[0]) == audio
 
         websocket.send_text(json.dumps({"action": "finish"}))
 
@@ -152,4 +155,5 @@ def test_stt_ws_full_flow(client: TestClient) -> None:
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_json()
 
-    assert _FakeRecognition.instances[0].stopped is True
+    assert _FakeOmniConversation.instances[0].committed is True
+    assert _FakeOmniConversation.instances[0].closed is True

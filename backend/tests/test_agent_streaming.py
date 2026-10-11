@@ -1,516 +1,231 @@
+"""AgentStreamService 集成测试：真实 create_agent + fake 模型 + 真实工具。
+
+不再手工模拟协议事件——直接跑一个真图，验证 typed projections 消费管线
+产出的 SSE 事件契约（part.delta / tool.start / tool.done）与状态累计语义。
+"""
+
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain.agents import create_agent
+from langchain_core.language_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
 
 from app.agent.context import AgentRequestContext
-from app.agent.streaming import (
-    AgentStreamService,
-    StreamRunState,
-    _extract_tool_events,
-    _serialize_stream_part,
-)
+from app.agent.streaming import AgentStreamService, StreamRunState
 
 
-# ---------------------------------------------------------------------------
-# Fixtures: minimal LangGraph-style v3 protocol stream emitters
-# ---------------------------------------------------------------------------
-#
-# The v3 streaming architecture consumes raw protocol events from
-# `astream_events(version="v3")`:
-#
-#   * model node text token  →  `messages` channel content-block-delta (text-delta)
-#   * model node finishes    →  `values` snapshot with AIMessage(tool_calls) / content
-#   * tool node finishes     →  `values` snapshot with ToolMessage(...)
-#
-# For brevity we elide tool-call content blocks on the messages channel — they
-# are explicitly ignored by the streaming layer in the new design.
+class _RuntimeService:
+    def __init__(self, agent: Any) -> None:
+        self._agent = agent
 
-
-def _text_delta_event(text: str) -> dict:
-    return {
-        "method": "messages",
-        "params": {
-            "data": [
-                {
-                    "event": "content-block-delta",
-                    "index": 0,
-                    "delta": {"type": "text-delta", "text": text},
-                }
-            ]
-        },
-    }
-
-
-def _values_event(data: dict) -> dict:
-    return {"method": "values", "params": {"data": data}}
-
-
-class _WhitespaceChunkAgent:
-    async def astream_events(self, _payload, config=None, context=None, version=None):
-        assert config is not None
-        assert context is not None
-        assert version == "v3"
-
-        async def _run():
-            yield _text_delta_event("你好 ")
-            yield _text_delta_event("世界")
-
-        return _run()
-
-
-class _FakeRuntimeService:
     def require_runtime(self):
-        return type("Runtime", (), {"agent": _WhitespaceChunkAgent()})()
+        return type("Runtime", (), {"agent": self._agent})()
 
 
-class _ToolCallAgent:
-    """Real LangGraph v3 emission shape:
-        1. messages channel: tool-call content blocks (ignored by streaming layer)
-        2. values snapshot: AIMessage with completed tool_calls (drives tool.start)
-        3. values snapshot: ToolMessage with execution result (drives tool.done)
-    """
+class _FakeChatModel(FakeMessagesListChatModel):
+    """按序回放消息的假模型；create_agent 需要 bind_tools 能力。"""
 
-    async def astream_events(self, _payload, config=None, context=None, version=None):
-        assert version == "v3"
-
-        async def _run():
-            # Streaming tool-call blocks — present in real traffic but
-            # deliberately ignored by the streaming layer (no tool.start here).
-            yield {
-                "method": "messages",
-                "params": {
-                    "data": [
-                        {
-                            "event": "content-block-start",
-                            "index": 0,
-                            "block": {"type": "tool_call", "name": "maps_weather"},
-                        }
-                    ]
-                },
-            }
-            # model node finishes -> values snapshot with AIMessage (drives tool.start)
-            yield _values_event(
-                {
-                    "model": {
-                        "messages": [
-                            AIMessage(
-                                content="",
-                                id="ai-msg-tool-1",
-                                tool_calls=[
-                                    {
-                                        "name": "maps_weather",
-                                        "args": {"city": "杭州"},
-                                        "id": "call-weather-1",
-                                        "type": "tool_call",
-                                    }
-                                ],
-                            )
-                        ]
-                    }
-                }
-            )
-            # tool node finishes -> values snapshot with ToolMessage (drives tool.done)
-            yield _values_event(
-                {
-                    "tools": {
-                        "messages": [
-                            ToolMessage(
-                                name="maps_weather",
-                                content="杭州晴，26℃",
-                                tool_call_id="call-weather-1",
-                            )
-                        ]
-                    }
-                }
-            )
-
-        return _run()
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_FakeChatModel":
+        return self
 
 
-class _ToolCallRuntimeService:
-    def require_runtime(self):
-        return type("Runtime", (), {"agent": _ToolCallAgent()})()
+def _agent_for(responses: list[AIMessage], tools: list | None = None):
+    model = _FakeChatModel(responses=responses)
+    return create_agent(model=model, tools=tools or [], context_schema=AgentRequestContext)
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-def test_serialize_stream_part_converts_langchain_messages() -> None:
-    part = {
-        "type": "messages",
-        "data": (
-            AIMessageChunk(content="你好", additional_kwargs={"reasoning_content": "先想一下。"}, id="chunk-1"),
-            {"langgraph_node": "model"},
-        ),
-    }
-
-    serialized = _serialize_stream_part(part)
-
-    assert serialized["type"] == "messages"
-    assert serialized["data"][0]["type"] == "AIMessageChunk"
-    assert serialized["data"][0]["data"]["content"] == "你好"
-    assert serialized["data"][0]["data"]["additional_kwargs"]["reasoning_content"] == "先想一下。"
-
-
-@pytest.mark.asyncio
-async def test_stream_agent_run_preserves_whitespace_for_tts_chunks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
-
-    service = AgentStreamService(runtime_service=_FakeRuntimeService())
-    state = StreamRunState()
-    captured_chunks: list[str] = []
-
-    async for _event_name, _payload in service.stream_agent_run(
-        thread_id="thread-tts",
-        agent_input={"messages": ["ignored"]},
-        checkpoint_id=None,
+def _context(thread_id: str) -> AgentRequestContext:
+    return AgentRequestContext(
+        user_id="user-1",
+        thread_id=thread_id,
+        locale="zh-CN",
         model_profile_key="standard",
-        state=state,
-        agent_context=AgentRequestContext(
-            user_id="user-1",
-            thread_id="thread-tts",
-            locale="zh-CN",
-            model_profile_key="standard",
-            session_meta={},
-        ),
-        on_assistant_text_chunk=captured_chunks.append,
-    ):
-        pass
-
-    assert "".join(captured_chunks) == "你好 世界"
-
-
-@pytest.mark.asyncio
-async def test_stream_agent_run_emits_one_tool_start_and_one_tool_done(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A single tool call should produce exactly one tool.start and one tool.done.
-
-    Previously the streaming layer additionally tried to emit tool.start from
-    `messages` tool_call_chunks, which collided with the canonical updates path
-    and produced N+1 spurious tool.start events that kept the UI spinning. The
-    new design routes tool lifecycle exclusively through `updates`, so this
-    test guards against regressions of that bug.
-    """
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
-
-    service = AgentStreamService(runtime_service=_ToolCallRuntimeService())
-    state = StreamRunState()
-    events: list[tuple[str, dict]] = []
-
-    async for event_name, payload in service.stream_agent_run(
-        thread_id="thread-tool-first",
-        agent_input={"messages": ["ignored"]},
-        checkpoint_id=None,
-        model_profile_key="standard",
-        state=state,
-        agent_context=AgentRequestContext(
-            user_id="user-1",
-            thread_id="thread-tool-first",
-            locale="zh-CN",
-            model_profile_key="standard",
-            session_meta={},
-        ),
-    ):
-        events.append((event_name, payload))
-
-    tool_events = [(name, p) for name, p in events if name.startswith("tool.")]
-    assert [name for name, _ in tool_events] == ["tool.start", "tool.done"]
-
-    start_part = tool_events[0][1]["part"]
-    done_part = tool_events[1][1]["part"]
-    assert start_part["status"] == "running"
-    assert start_part["tool_name"] == "maps_weather"
-    assert start_part["input"] == {"city": "杭州"}  # complete dict from updates, no partial JSON
-    assert done_part["status"] == "success"
-    assert done_part["output"] == "杭州晴，26℃"
-    assert [part.type for part in state.ui_parts] == ["tool"]
-
-
-def _reasoning_delta_event(text: str) -> dict:
-    return {
-        "method": "messages",
-        "params": {
-            "data": [
-                {
-                    "event": "content-block-delta",
-                    "index": 0,
-                    "delta": {"type": "reasoning-delta", "reasoning": text},
-                }
-            ]
-        },
-    }
-
-
-class _MultiSuperstepAgent:
-    """两轮模型调用 + 一次工具执行的完整 v3 事件序列。
-
-    轮1: 思考增量 → 正文增量（触发 reasoning→text 切换 sealing）
-    轮2: 工具执行（values 快照驱动 tool.start/tool.done）
-    轮3: 思考增量 → 正文增量（工具后新开 part）
-    """
-
-    async def astream_events(self, _payload, config=None, context=None, version=None):
-        assert version == "v3"
-
-        async def _run():
-            yield _reasoning_delta_event("先想")
-            yield _reasoning_delta_event("一下。")
-            yield _text_delta_event("我先查")
-            yield _values_event(
-                {
-                    "model": {
-                        "messages": [
-                            AIMessage(
-                                content="我先查",
-                                tool_calls=[
-                                    {
-                                        "name": "maps_weather",
-                                        "args": {"city": "杭州"},
-                                        "id": "call-ms-1",
-                                        "type": "tool_call",
-                                    }
-                                ],
-                            )
-                        ]
-                    }
-                }
-            )
-            yield _values_event(
-                {
-                    "tools": {
-                        "messages": [
-                            ToolMessage(name="maps_weather", content="杭州晴", tool_call_id="call-ms-1")
-                        ]
-                    }
-                }
-            )
-            yield _reasoning_delta_event("查到了。")
-            yield _text_delta_event("杭州晴，26℃。")
-
-        return _run()
-
-
-@pytest.mark.asyncio
-async def test_stream_multi_superstep_part_ordering_and_accumulation() -> None:
-    """多轮调用下：part 按类型切换正确 seal、工具事件各一次、累计文本/思考完整。"""
-    service = AgentStreamService(runtime_service=_FakeRuntimeServiceOf(_MultiSuperstepAgent()))
-    state = StreamRunState()
-    tts_chunks: list[str] = []
-    events: list[tuple[str, dict]] = []
-
-    async for event_name, payload in service.stream_agent_run(
-        thread_id="thread-multi",
-        agent_input={"messages": ["ignored"]},
-        checkpoint_id=None,
-        model_profile_key="standard",
-        state=state,
-        agent_context=AgentRequestContext(
-            user_id="user-1",
-            thread_id="thread-multi",
-            model_profile_key="standard",
-            session_meta={},
-        ),
-        on_assistant_text_chunk=tts_chunks.append,
-    ):
-        events.append((event_name, payload))
-
-    names = [name for name, _ in events]
-    # 事件骨架：reasoning → seal → text → seal → tool.start → tool.done → reasoning → seal → text
-    assert names == [
-        "part.delta",  # reasoning "先想"
-        "part.delta",  # reasoning "一下。"
-        "part.delta",  # seal reasoning-1
-        "part.delta",  # text "我先查"
-        "part.delta",  # seal text-1（工具来临前收尾）
-        "tool.start",
-        "tool.done",
-        "part.delta",  # reasoning "查到了。"（工具后新开 reasoning part）
-        "part.delta",  # seal reasoning-2
-        "part.delta",  # text "杭州晴，26℃。"
-    ]
-
-    # part 序列与状态
-    assert [(p.type, p.text) for p in state.ui_parts if p.type in {"reasoning", "text"}] == [
-        ("reasoning", "先想一下。"),
-        ("text", "我先查"),
-        ("reasoning", "查到了。"),
-        ("text", "杭州晴，26℃。"),
-    ]
-    assert [p.status for p in state.ui_parts if p.type in {"reasoning", "text"}] == [
-        "completed",
-        "completed",
-        "completed",
-        "streaming",  # 最后一段正文尚未被显式收尾（message.completed 时由 service 收尾）
-    ]
-
-    # 累计语义（build_final_response 的数据源）
-    assert state.assistant_text == "我先查杭州晴，26℃。"
-    assert state.reasoning_text == "先想一下。查到了。"
-
-    # TTS 逐字流只含可见文本，含空白、无思考内容
-    assert "".join(tts_chunks) == "我先查杭州晴，26℃。"
-
-    # 工具事件恰好一次 start / 一次 done
-    assert names.count("tool.start") == 1
-    assert names.count("tool.done") == 1
-
-
-def _FakeRuntimeServiceOf(agent):
-    return type("RuntimeService", (), {"require_runtime": lambda self: type("Runtime", (), {"agent": agent})()})()
-
-
-def test_extract_tool_events_prefers_tool_artifact_for_payload() -> None:
-    events = list(
-        _extract_tool_events(
-            {
-                "tools": {
-                    "messages": [
-                        ToolMessage(
-                            name="exa_web_search_advanced_exa",
-                            content="Exa 高级搜索找到 1 条结果。",
-                            artifact={"kind": "exa_search", "results": [{"title": "Official Guide"}]},
-                            tool_call_id="call-exa-1",
-                        )
-                    ]
-                }
-            },
-            seen_called=set(),
-            seen_returned=set(),
-        )
+        session_meta={},
     )
 
-    assert len(events) == 1
-    event_name, event_payload, trace = events[0]
-    assert event_name == "tool_returned"
-    assert event_payload == {
-        "tool_name": "exa_web_search_advanced_exa",
-        "payload": "Exa 高级搜索找到 1 条结果。",
-    }
-    assert trace.payload == {"kind": "exa_search", "results": [{"title": "Official Guide"}]}
 
-
-class _HotelToolAgent:
-    """Streams the canonical model→tools values-snapshot sequence with a hotel artifact.
-
-    Verifies that ``ChatToolPart.cards`` is populated by the structured card
-    extractor when the underlying tool returns a recognisable payload.
-    """
-
-    async def astream_events(self, _payload, config=None, context=None, version=None):
-        assert version == "v3"
-
-        async def _run():
-            # model node finishes — drives tool.start
-            yield _values_event(
-                {
-                    "model": {
-                        "messages": [
-                            AIMessage(
-                                content="",
-                                id="ai-msg-hotel-1",
-                                tool_calls=[
-                                    {
-                                        "name": "rollinggo-hotel_searchHotels",
-                                        "args": {"city": "成都"},
-                                        "id": "call-hotel-1",
-                                        "type": "tool_call",
-                                    }
-                                ],
-                            )
-                        ]
-                    }
-                }
-            )
-            # tools node finishes — drives tool.done with cards extracted
-            yield _values_event(
-                {
-                    "tools": {
-                        "messages": [
-                            ToolMessage(
-                                name="rollinggo-hotel_searchHotels",
-                                content="找到 2 家酒店",
-                                artifact=[
-                                    {
-                                        "hotelName": "桔子酒店",
-                                        "address": "东胜街1号",
-                                        "price": {"hasPrice": True, "lowestPrice": 277, "currency": "CNY"},
-                                        "starLevel": 3,
-                                        "bookingUrl": "https://example.com/booking/1",
-                                    },
-                                    {
-                                        "hotelName": "海友酒店",
-                                        "location": "锦江区",
-                                        "price": {"hasPrice": True, "lowestPrice": 292, "currency": "CNY"},
-                                        "bookingUrl": "https://example.com/booking/2",
-                                    },
-                                ],
-                                tool_call_id="call-hotel-1",
-                            )
-                        ]
-                    }
-                }
-            )
-
-        return _run()
-
-
-class _HotelToolRuntimeService:
-    def require_runtime(self):
-        return type("Runtime", (), {"agent": _HotelToolAgent()})()
-
-
-@pytest.mark.asyncio
-async def test_stream_agent_run_attaches_structured_cards_to_tool_part(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hotel-list payload should be parsed into typed cards on the tool part."""
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_MODEL", "test-standard-model")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_PROVIDER", "openai")
-    monkeypatch.setenv("LLM_PROFILE_STANDARD_TEMPERATURE", "0.2")
-
-    service = AgentStreamService(runtime_service=_HotelToolRuntimeService())
+async def _collect(service: AgentStreamService, agent: Any, thread_id: str):
     state = StreamRunState()
+    tts: list[str] = []
     events: list[tuple[str, dict]] = []
-
-    async for event_name, payload in service.stream_agent_run(
-        thread_id="thread-hotel-cards",
-        agent_input={"messages": ["ignored"]},
+    async for name, payload in service.stream_agent_run(
+        thread_id=thread_id,
+        agent_input={"messages": []},
         checkpoint_id=None,
         model_profile_key="standard",
         state=state,
-        agent_context=AgentRequestContext(
-            user_id="user-1",
-            thread_id="thread-hotel-cards",
-            locale="zh-CN",
-            model_profile_key="standard",
-            session_meta={},
-        ),
+        agent_context=_context(thread_id),
+        on_assistant_text_chunk=tts.append,
+        agent=agent,
     ):
-        events.append((event_name, payload))
+        events.append((name, payload))
+    return state, tts, events
 
-    # Exactly tool.start then tool.done
-    assert [event_name for event_name, _ in events] == ["tool.start", "tool.done"]
-    started, finished = events
-    # tool.start carries no cards yet; tool.done carries them
-    assert started[1]["part"]["cards"] == []
-    cards = finished[1]["part"]["cards"]
-    assert len(cards) == 2
-    assert cards[0]["card_type"] == "hotel"
-    assert cards[0]["data"]["name"] == "桔子酒店"
-    assert cards[0]["data"]["price"] == 277.0
-    assert cards[0]["source_tool_call_id"] == "call-hotel-1"
-    assert cards[1]["data"]["name"] == "海友酒店"
 
-    tool_part = next(part for part in state.ui_parts if part.type == "tool")
-    assert len(tool_part.cards) == 2  # type: ignore[union-attr]
-    assert tool_part.cards[0].card_type == "hotel"  # type: ignore[union-attr]
+@pytest.mark.asyncio
+async def test_text_streaming_accumulates_and_feeds_tts() -> None:
+    agent = _agent_for([AIMessage(content="你好 世界")])
+    service = AgentStreamService(runtime_service=_RuntimeService(agent))
+
+    state, tts, events = await _collect(service, agent, "t-text")
+
+    assert [name for name, _ in events] == ["part.delta"]
+    assert events[0][1]["text_delta"] == "你好 世界"
+    assert state.assistant_text == "你好 世界"
+    assert "".join(tts) == "你好 世界"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_and_text_parts_are_separate() -> None:
+    agent = _agent_for(
+        [
+            AIMessage(
+                content=[
+                    {"type": "reasoning", "reasoning": "先想一下。"},
+                    {"type": "text", "text": "答案是 42。"},
+                ]
+            )
+        ]
+    )
+    service = AgentStreamService(runtime_service=_RuntimeService(agent))
+
+    state, tts, events = await _collect(service, agent, "t-reason")
+
+    kinds = [(p["part_type"], p["text_delta"]) for _name, p in events if p.get("text_delta")]
+    assert ("reasoning", "先想一下。") in kinds
+    assert ("text", "答案是 42。") in kinds
+    assert state.reasoning_text == "先想一下。"
+    assert state.assistant_text == "答案是 42。"
+    # TTS 只拿可见文本
+    assert "".join(tts) == "答案是 42。"
+
+
+@tool
+def maps_weather(city: str) -> str:
+    """查询城市天气。"""
+    return "杭州晴，26℃"
+
+
+@pytest.mark.asyncio
+async def test_tool_lifecycle_emits_one_start_one_done() -> None:
+    agent = _agent_for(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "maps_weather", "args": {"city": "杭州"}, "id": "call-w1", "type": "tool_call"}
+                ],
+            ),
+            AIMessage(content="杭州晴，26℃，适合出行。"),
+        ],
+        tools=[maps_weather],
+    )
+    service = AgentStreamService(runtime_service=_RuntimeService(agent))
+
+    state, _tts, events = await _collect(service, agent, "t-tool")
+
+    names = [name for name, _ in events]
+    assert names.count("tool.start") == 1
+    assert names.count("tool.done") == 1
+    start = next(p for n, p in events if n == "tool.start")["part"]
+    done = next(p for n, p in events if n == "tool.done")["part"]
+    assert start["status"] == "running"
+    assert start["tool_name"] == "maps_weather"
+    assert start["input"] == {"city": "杭州"}
+    assert done["status"] == "success"
+    assert done["output"] == "杭州晴，26℃"
+    # 工具前的文本 part 被收尾
+    assert state.streamed_tool_traces[0].phase == "called"
+    assert state.streamed_tool_traces[1].phase == "returned"
+
+
+@tool
+def rollinggo_hotel_search(city: str) -> Any:
+    """搜索酒店。"""
+    return [
+        {
+            "hotelName": "桔子酒店",
+            "address": "东胜街1号",
+            "price": {"hasPrice": True, "lowestPrice": 277, "currency": "CNY"},
+            "starLevel": 3,
+            "bookingUrl": "https://example.com/booking/1",
+        },
+        {
+            "hotelName": "海友酒店",
+            "location": "锦江区",
+            "price": {"hasPrice": True, "lowestPrice": 292, "currency": "CNY"},
+            "bookingUrl": "https://example.com/booking/2",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_structured_cards_attached_from_final_state() -> None:
+    agent = _agent_for(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "rollinggo_hotel_search",
+                        "args": {"city": "成都"},
+                        "id": "call-h1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="给你挑了两家。"),
+        ],
+        tools=[rollinggo_hotel_search],
+    )
+    service = AgentStreamService(runtime_service=_RuntimeService(agent))
+
+    state, _tts, events = await _collect(service, agent, "t-cards")
+
+    tool_part = next(p for p in state.ui_parts if p.type == "tool")
+    assert tool_part.cards is not None and len(tool_part.cards) == 2
+    assert tool_part.cards[0].card_type == "hotel"
+    assert tool_part.cards[0].data["name"] == "桔子酒店"
+    # 引用来源也从最终状态补齐
+    assert tool_part.sources and tool_part.sources[0].url == "https://example.com/booking/1"
+    assert state.citation_sources
+
+
+@tool
+def broken_tool(query: str) -> str:
+    """总是失败的工具。"""
+    raise ValueError("boom")
+
+
+@pytest.mark.asyncio
+async def test_tool_error_surfaces_as_error_status() -> None:
+    from langchain.agents.middleware import ToolErrorMiddleware
+
+    model = _FakeChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "broken_tool", "args": {"query": "x"}, "id": "call-b1", "type": "tool_call"}
+                ],
+            ),
+            AIMessage(content="工具坏了，抱歉。"),
+        ]
+    )
+    agent = create_agent(
+        model=model,
+        tools=[broken_tool],
+        context_schema=AgentRequestContext,
+        middleware=[ToolErrorMiddleware(on_error=lambda exc, request: f"工具执行失败：{exc}")],
+    )
+    service = AgentStreamService(runtime_service=_RuntimeService(agent))
+
+    state, _tts, events = await _collect(service, agent, "t-err")
+
+    done = next(p for n, p in events if n == "tool.done")["part"]
+    assert done["status"] == "error"
+    assert state.streamed_tool_traces[-1].result_status == "error"

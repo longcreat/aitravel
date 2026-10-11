@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 
 from app.agent.runtime import AgentRuntime
 from app.schemas.chat import (
@@ -41,46 +41,6 @@ def build_final_response(
             mcp_errors=[*runtime.mcp_bundle.errors, *(connector_errors or [])],
         ),
     )
-
-
-def _reasoning_blocks_to_text(content: Any) -> str:
-    """从 content block 列表中提取 reasoning 文本。"""
-    if not isinstance(content, list):
-        return ""
-
-    chunks: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-
-        item_type = str(item.get("type") or "").strip().lower()
-        if item_type not in {"reasoning", "reasoning_content"}:
-            continue
-
-        reasoning = item.get("reasoning")
-        if isinstance(reasoning, str) and reasoning:
-            chunks.append(reasoning)
-
-        summary = item.get("summary")
-        if isinstance(summary, list):
-            for summary_item in summary:
-                if not isinstance(summary_item, dict):
-                    continue
-                if str(summary_item.get("type") or "").strip().lower() != "summary_text":
-                    continue
-                text = summary_item.get("text")
-                if isinstance(text, str) and text:
-                    chunks.append(text)
-
-        reasoning_content = item.get("reasoning_content")
-        if isinstance(reasoning_content, str) and reasoning_content:
-            chunks.append(reasoning_content)
-
-        text = item.get("text")
-        if item_type == "reasoning_content" and isinstance(text, str) and text:
-            chunks.append(text)
-
-    return "".join(chunks).strip()
 
 
 def _content_to_text(content: Any) -> str:
